@@ -1,8 +1,12 @@
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import { Card, Btn, PersalTag, RoleBadge, StatusBadge } from './Shared';
+import SearchFilter from './SearchFilter';
 
-export function ECMQueue({ claims, onRoute }) {
+export function ECMQueue({ claims, onRoute, onViewClaim }) {
   const ecm = claims.filter(c => c.status === 'ecm');
+  const [filtered, setFiltered] = useState(ecm);
+  const handleFilter = useCallback(r => setFiltered(r), []);
+
   return (
     <div>
       <div style={{ marginBottom: '1.5rem' }}>
@@ -13,6 +17,9 @@ export function ECMQueue({ claims, onRoute }) {
           Upload compiled mandate to ECM and route to DMC Payroll Team Leader
         </div>
       </div>
+
+      <SearchFilter claims={ecm} onChange={handleFilter} />
+
       <Card noPad>
         <table>
           <thead>
@@ -22,21 +29,28 @@ export function ECMQueue({ claims, onRoute }) {
             </tr>
           </thead>
           <tbody>
-            {ecm.length === 0 ? (
-              <tr><td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
-                No mandates in ECM queue
-              </td></tr>
-            ) : ecm.map(c => (
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
+                  {ecm.length === 0 ? 'No mandates in ECM queue' : 'No records match the current filters.'}
+                </td>
+              </tr>
+            ) : filtered.map(c => (
               <tr key={c.ref}>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{c.ref}</td>
                 <td style={{ fontWeight: 500 }}>{c.name}</td>
                 <td><PersalTag code={c.mandate || '—'} /></td>
                 <td><StatusBadge status="captured" /></td>
-                <td style={{ fontFamily: 'var(--mono)' }}>R {c.amount.toFixed(2)}</td>
+                <td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount || 0).toFixed(2)}</td>
                 <td>
-                  <Btn variant="primary" size="sm" onClick={() => onRoute(c.ref)}>
-                    <i className="ti ti-send" style={{ fontSize: 13 }} /> Route to DMC
-                  </Btn>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <Btn size="sm" onClick={() => onViewClaim?.(c)}>
+                      <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
+                    </Btn>
+                    <Btn variant="primary" size="sm" onClick={() => onRoute(c.ref)}>
+                      <i className="ti ti-send" style={{ fontSize: 13 }} /> Route to DMC
+                    </Btn>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -47,8 +61,11 @@ export function ECMQueue({ claims, onRoute }) {
   );
 }
 
-export function DMCQueue({ claims, onPaid }) {
+export function DMCQueue({ claims, onPaid, onViewClaim }) {
   const routed = claims.filter(c => c.status === 'routed');
+  const [filtered, setFiltered] = useState(routed);
+  const handleFilter = useCallback(r => setFiltered(r), []);
+
   return (
     <div>
       <div style={{ marginBottom: '1.5rem' }}>
@@ -59,6 +76,9 @@ export function DMCQueue({ claims, onPaid }) {
           Receive mandate from ECM → pay on supplementary → verify payment confirmed on Persal
         </div>
       </div>
+
+      <SearchFilter claims={routed} onChange={handleFilter} />
+
       <Card noPad>
         <table>
           <thead>
@@ -68,27 +88,34 @@ export function DMCQueue({ claims, onPaid }) {
             </tr>
           </thead>
           <tbody>
-            {routed.length === 0 ? (
-              <tr><td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
-                No mandates received from ECM yet
-              </td></tr>
-            ) : routed.map(c => (
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
+                  {routed.length === 0 ? 'No mandates received from ECM yet' : 'No records match the current filters.'}
+                </td>
+              </tr>
+            ) : filtered.map(c => (
               <tr key={c.ref}>
                 <td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{c.ref}</td>
                 <td style={{ fontWeight: 500 }}>{c.name}</td>
                 <td><PersalTag code={c.persal} /></td>
                 <td><PersalTag code={c.mandate || '—'} /></td>
-                <td style={{ fontFamily: 'var(--mono)' }}>R {c.amount.toFixed(2)}</td>
+                <td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount || 0).toFixed(2)}</td>
                 <td>
                   <div style={{ fontSize: 11, color: 'var(--text2)' }}>
                     <div>Persal nr: {c.persal}</div>
-                    <div>Amount: R {c.amount.toFixed(2)}</div>
+                    <div>Amount: R {(c.amount || 0).toFixed(2)}</div>
                   </div>
                 </td>
                 <td>
-                  <Btn variant="success" size="sm" onClick={() => onPaid(c.ref)}>
-                    <i className="ti ti-check" style={{ fontSize: 13 }} /> Mark paid
-                  </Btn>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <Btn size="sm" onClick={() => onViewClaim?.(c)}>
+                      <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
+                    </Btn>
+                    <Btn variant="success" size="sm" onClick={() => onPaid(c.ref)}>
+                      <i className="ti ti-check" style={{ fontSize: 13 }} /> Mark paid
+                    </Btn>
+                  </div>
                 </td>
               </tr>
             ))}

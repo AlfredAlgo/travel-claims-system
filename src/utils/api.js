@@ -28,10 +28,9 @@ async function apiFetch(path, options = {}) {
 }
 
 export const api = {
-  getClaims: ()                         => apiFetch('/api/claims'),
-  createClaim: (claim)                  => apiFetch('/api/claims', { method: 'POST', body: JSON.stringify(claim) }),
-  updateStatus: (ref, status, extra={}) => apiFetch(`/api/claims/${ref}/status`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status, ...extra }),
-  }),
+  getClaims:      ()                         => apiFetch('/api/claims'),
+  createClaim:    (claim)                    => apiFetch('/api/claims', { method: 'POST', body: JSON.stringify(claim) }),
+  updateStatus:   (ref, status, extra = {})  => apiFetch(`/api/claims/${ref}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) }),
+  getHistory:     (ref)                      => apiFetch(`/api/claims/${ref}/history`),
+  getAuditLog:    ()                         => apiFetch('/api/audit'),
 };

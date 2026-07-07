@@ -232,6 +232,38 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   res.json(normalizeClaim(updated));
 });
 
+// ── Claim history ────────────────────────────────────────────────────────────
+
+app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
+  const { data: claim } = await supabase
+    .from('claims').select('id').eq('ref', req.params.ref).single();
+  if (!claim) return res.status(404).json({ error: 'Claim not found' });
+
+  const { data, error } = await supabase
+    .from('claim_status_history')
+    .select('id, from_status, to_status, note, created_at, users(name, role)')
+    .eq('claim_id', claim.id)
+    .order('created_at', { ascending: true });
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ── Audit log (admin only) ───────────────────────────────────────────────────
+
+app.get('/api/audit', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+
+  const { data, error } = await supabase
+    .from('claim_status_history')
+    .select('id, from_status, to_status, note, created_at, users(name, role), claims(ref, name, persal, dept)')
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
 // ── Startup ──────────────────────────────────────────────────────────────────
 
 async function ensureUsersSeeded() {

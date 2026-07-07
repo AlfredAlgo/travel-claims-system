@@ -36,8 +36,9 @@ const ALL_NAV = [
   {
     section: 'Admin',
     items: [
-      { id: 'tariffs', icon: 'table',     label: 'Tariff table', roles: ['admin'] },
-      { id: 'reports', icon: 'chart-bar', label: 'Reports',      roles: ['admin'] },
+      { id: 'tariffs', icon: 'table',         label: 'Tariff table', roles: ['admin'] },
+      { id: 'reports', icon: 'chart-bar',     label: 'Reports',      roles: ['admin'] },
+      { id: 'audit',   icon: 'shield-check',  label: 'Audit trail',  roles: ['admin'] },
     ],
   },
 ];

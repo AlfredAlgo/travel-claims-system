@@ -11,6 +11,8 @@ import HRSQueue from './components/HRSQueue';
 import { ECMQueue, DMCQueue } from './components/Queues';
 import Tariffs from './components/Tariffs';
 import Reports from './components/Reports';
+import AuditLog from './components/AuditLog';
+import ClaimModal from './components/ClaimModal';
 import { Toast } from './components/Shared';
 import { api } from './utils/api';
 
@@ -20,16 +22,17 @@ const ROLE_PAGES = {
   hrs:        ['dashboard', 'hrs', 'ecm'],
   ecm:        ['dashboard', 'ecm'],
   dmc:        ['dashboard', 'dmc'],
-  admin:      ['dashboard', 'tariffs', 'reports'],
+  admin:      ['dashboard', 'tariffs', 'reports', 'audit'],
 };
 
 function AppShell() {
   const { user, logout } = useAuth();
-  const [page, setClaims_page] = useState((ROLE_PAGES[user?.role] || ['dashboard'])[0]);
-  const [claims, setClaims] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [toastMsg, setToastMsg] = useState('');
+  const [page, setPage]             = useState((ROLE_PAGES[user?.role] || ['dashboard'])[0]);
+  const [claims, setClaims]         = useState([]);
+  const [loading, setLoading]       = useState(true);
+  const [toastMsg, setToastMsg]     = useState('');
   const [toastVisible, setToastVisible] = useState(false);
+  const [selectedClaim, setSelectedClaim] = useState(null);
 
   const toast = useCallback((msg) => {
     setToastMsg(msg);
@@ -37,7 +40,6 @@ function AppShell() {
     setTimeout(() => setToastVisible(false), 3200);
   }, []);
 
-  // Load claims from API on mount
   useEffect(() => {
     api.getClaims()
       .then(data => setClaims(data))
@@ -48,13 +50,14 @@ function AppShell() {
   const allowed = ROLE_PAGES[user?.role] || ['dashboard'];
 
   function onNav(id) {
-    if (allowed.includes(id)) setClaims_page(id);
+    if (allowed.includes(id)) setPage(id);
   }
 
-  // Optimistically update local state after a successful API status change
   async function updateStatus(ref, newStatus, extra = {}) {
     const updated = await api.updateStatus(ref, newStatus, extra);
     setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+    // Keep modal in sync if it's open on this claim
+    setSelectedClaim(prev => (prev?.ref === ref ? updated : prev));
     return updated;
   }
 
@@ -112,6 +115,7 @@ function AppShell() {
           <MyClaims
             claims={claims.filter(c => c.persal === user?.persal)}
             onNav={onNav}
+            onViewClaim={setSelectedClaim}
             toast={toast}
           />
         );
@@ -120,6 +124,7 @@ function AppShell() {
         return (
           <SupervisorQueue
             claims={claims}
+            onViewClaim={setSelectedClaim}
             onApprove={async ref => {
               try {
                 await updateStatus(ref, 'approved');
@@ -139,6 +144,7 @@ function AppShell() {
         return (
           <HRSQueue
             claims={claims}
+            onViewClaim={setSelectedClaim}
             onCapture={async ref => {
               const mandate = 'MAN-2026-0' + (Math.floor(Math.random() * 90) + 10);
               try {
@@ -159,6 +165,7 @@ function AppShell() {
         return (
           <ECMQueue
             claims={claims}
+            onViewClaim={setSelectedClaim}
             onRoute={async ref => {
               try {
                 await updateStatus(ref, 'routed');
@@ -172,6 +179,7 @@ function AppShell() {
         return (
           <DMCQueue
             claims={claims}
+            onViewClaim={setSelectedClaim}
             onPaid={async ref => {
               try {
                 await updateStatus(ref, 'paid');
@@ -187,6 +195,9 @@ function AppShell() {
       case 'reports':
         return <Reports claims={claims} toast={toast} />;
 
+      case 'audit':
+        return <AuditLog toast={toast} />;
+
       default:
         return <Dashboard claims={claims} onNav={onNav} user={user} />;
     }
@@ -199,6 +210,13 @@ function AppShell() {
         {renderPage()}
       </main>
       <Toast message={toastMsg} visible={toastVisible} />
+      {selectedClaim && (
+        <ClaimModal
+          claim={selectedClaim}
+          onClose={() => setSelectedClaim(null)}
+          toast={toast}
+        />
+      )}
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
     </div>
   );
