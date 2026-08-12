@@ -4,14 +4,14 @@ const ALL_NAV = [
   {
     section: 'Overview',
     items: [
-      { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard', roles: ['official', 'supervisor', 'hrs', 'ecm', 'dmc', 'admin'] },
+      { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard', roles: ['official', 'supervisor', 'hrs', 'admin'] },
     ],
   },
   {
     section: 'My Claims',
     items: [
-      { id: 'new-claim', icon: 'plus',         label: 'New claim',  roles: ['official'] },
-      { id: 'my-claims', icon: 'file-invoice', label: 'My claims',  roles: ['official'], badge: 'my' },
+      { id: 'new-claim', icon: 'plus',         label: 'New claim', roles: ['official'] },
+      { id: 'my-claims', icon: 'file-invoice', label: 'My claims', roles: ['official'], badge: 'my' },
     ],
   },
   {
@@ -21,24 +21,17 @@ const ALL_NAV = [
     ],
   },
   {
-    section: 'HRS Payroll',
+    section: 'Internal HR',
     items: [
-      { id: 'hrs', icon: 'database',     label: 'Persal capture', roles: ['hrs'], badge: 'hrs' },
-      { id: 'ecm', icon: 'cloud-upload', label: 'ECM mandates',   roles: ['hrs', 'ecm'], badge: 'ecm' },
-    ],
-  },
-  {
-    section: 'DMC Payroll',
-    items: [
-      { id: 'dmc', icon: 'cash', label: 'Payment run', roles: ['dmc'] },
+      { id: 'hrs', icon: 'checklist', label: 'Claims queue', roles: ['hrs'], badge: 'hrs' },
     ],
   },
   {
     section: 'Admin',
     items: [
-      { id: 'tariffs', icon: 'table',         label: 'Tariff table', roles: ['admin'] },
-      { id: 'reports', icon: 'chart-bar',     label: 'Reports',      roles: ['admin'] },
-      { id: 'audit',   icon: 'shield-check',  label: 'Audit trail',  roles: ['admin'] },
+      { id: 'tariffs', icon: 'table',        label: 'Tariff table', roles: ['admin'] },
+      { id: 'reports', icon: 'chart-bar',    label: 'Reports',      roles: ['admin'] },
+      { id: 'audit',   icon: 'shield-check', label: 'Audit trail',  roles: ['admin'] },
     ],
   },
 ];
@@ -46,9 +39,7 @@ const ALL_NAV = [
 const ROLE_LABELS = {
   official:   'Official',
   supervisor: 'Supervisor',
-  hrs:        'HRS Payroll',
-  ecm:        'ECM Admin',
-  dmc:        'DMC Payroll',
+  hrs:        'Internal HR',
   admin:      'System Admin',
 };
 
@@ -56,8 +47,6 @@ const ROLE_COLORS = {
   official:   { bg: 'var(--teal-bg)',   color: 'var(--teal-text)' },
   supervisor: { bg: 'var(--amber-bg)',  color: 'var(--amber-text)' },
   hrs:        { bg: 'var(--blue-bg)',   color: 'var(--blue-text)' },
-  ecm:        { bg: 'var(--purple-bg)', color: 'var(--purple-text)' },
-  dmc:        { bg: 'var(--green-bg)',  color: 'var(--green-text)' },
   admin:      { bg: 'var(--gray-bg)',   color: 'var(--gray-text)' },
 };
 
@@ -105,8 +94,7 @@ export default function Sidebar({ active, onNav, badges, user, onLogout }) {
                     background: isActive ? 'var(--blue-bg)' : 'transparent',
                     color: isActive ? 'var(--blue-text)' : 'var(--text2)',
                     fontWeight: isActive ? 500 : 400,
-                    marginBottom: 1,
-                    transition: 'background .12s',
+                    marginBottom: 1, transition: 'background .12s',
                   }}
                 >
                   <i className={`ti ti-${item.icon}`} style={{ fontSize: 16 }} />
@@ -126,11 +114,7 @@ export default function Sidebar({ active, onNav, badges, user, onLogout }) {
         ))}
       </div>
 
-      <div style={{
-        padding: '1rem 1.25rem',
-        borderTop: '0.5px solid var(--border)',
-        marginTop: 'auto',
-      }}>
+      <div style={{ padding: '1rem 1.25rem', borderTop: '0.5px solid var(--border)', marginTop: 'auto' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <div style={{
             width: 28, height: 28, borderRadius: '50%',
@@ -144,7 +128,7 @@ export default function Sidebar({ active, onNav, badges, user, onLogout }) {
             <div style={{ fontSize: 13, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {user?.name || '—'}
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+            <div style={{ marginTop: 2 }}>
               <span style={{
                 fontSize: 10, fontWeight: 500, padding: '1px 6px', borderRadius: 8,
                 background: roleColors.bg, color: roleColors.color,
@@ -160,8 +144,7 @@ export default function Sidebar({ active, onNav, badges, user, onLogout }) {
             width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
             padding: '6px 10px', borderRadius: 'var(--radius)',
             border: '0.5px solid var(--border2)', background: 'transparent',
-            color: 'var(--text2)', fontSize: 12, cursor: 'pointer',
-            transition: 'background .12s',
+            color: 'var(--text2)', fontSize: 12, cursor: 'pointer', transition: 'background .12s',
           }}
           onMouseEnter={e => { e.currentTarget.style.background = 'var(--red-bg)'; e.currentTarget.style.color = 'var(--red-text)'; }}
           onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text2)'; }}

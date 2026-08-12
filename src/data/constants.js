@@ -30,13 +30,10 @@ export const ST_CODES = [
 ];
 
 export const STATUS_META = {
-  draft:    { label: 'Draft',             cls: 'gray' },
-  pending:  { label: 'Pending approval',  cls: 'amber' },
-  approved: { label: 'Approved',          cls: 'green' },
-  rejected: { label: 'Rejected',          cls: 'red' },
-  captured: { label: 'Persal captured',   cls: 'blue' },
-  ecm:      { label: 'ECM uploaded',      cls: 'purple' },
-  routed:   { label: 'Routed to DMC',     cls: 'purple' },
-  paid:     { label: 'Paid',              cls: 'teal' },
+  draft:          { label: 'Draft',                  cls: 'gray'   },
+  pending:        { label: 'Pending approval',       cls: 'amber'  },
+  approved:       { label: 'Approved',               cls: 'green'  },
+  rejected:       { label: 'Rejected',               cls: 'red'    },
+  info_requested: { label: 'Info requested',         cls: 'purple' },
+  paid:           { label: 'Paid',                   cls: 'teal'   },
 };
-

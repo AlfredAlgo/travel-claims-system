@@ -165,8 +165,19 @@ function Timeline({ history, loading }) {
             </div>
             <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 3 }}>
               {new Date(h.created_at).toLocaleString('en-ZA')} · {h.users?.name || 'System'}
-              {h.note ? <> · <em>{h.note}</em></> : null}
             </div>
+            {(h.info_message || h.note) && (
+              <div style={{
+                marginTop: 5, padding: '6px 10px',
+                background: (h.to_status === 'info_requested') ? 'var(--purple-bg)' : 'var(--surface2)',
+                border: `0.5px solid ${h.to_status === 'info_requested' ? 'var(--purple-text)' : 'var(--border)'}`,
+                borderRadius: 'var(--radius)',
+                fontSize: 12,
+                color: h.to_status === 'info_requested' ? 'var(--purple-text)' : 'var(--text2)',
+              }}>
+                {h.info_message || h.note}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -290,10 +301,10 @@ export default function ClaimModal({ claim, onClose }) {
                 <div style={{ fontSize: 13, marginBottom: 6 }}>{claim.purpose || '—'}</div>
                 <Row2 a="Log sheet ref" av={claim.logsheet || '—'} b="Signed by" bv={claim.sigName ? `${claim.sigName} (${claim.sigRank})` : '—'} />
               </Section>
-              {claim.docs?.length > 0 && (
+              {(claim.docs?.length > 0 || claim.docLinks?.length > 0) && (
                 <Section title="Supporting documents">
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {claim.docs.map(d => (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: claim.docLinks?.length > 0 ? 8 : 0 }}>
+                    {(claim.docs || []).map(d => (
                       <span key={d} style={{
                         fontSize: 12, padding: '3px 10px', borderRadius: 10,
                         background: 'var(--green-bg)', color: 'var(--green-text)',
@@ -302,6 +313,21 @@ export default function ClaimModal({ claim, onClose }) {
                       </span>
                     ))}
                   </div>
+                  {(claim.docLinks || []).length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {claim.docLinks.map((dl, i) => (
+                        <a key={i} href={dl.url} target="_blank" rel="noopener noreferrer" style={{
+                          display: 'flex', alignItems: 'center', gap: 6,
+                          fontSize: 13, color: 'var(--blue-text)', textDecoration: 'none',
+                          padding: '5px 10px', background: 'var(--blue-bg)',
+                          borderRadius: 'var(--radius)',
+                        }}>
+                          <i className="ti ti-download" style={{ fontSize: 14 }} />
+                          {dl.name || 'Document'} <span style={{ fontSize: 11, color: 'var(--text3)', marginLeft: 4 }}>↗</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </Section>
               )}
               {claim.mandate && (

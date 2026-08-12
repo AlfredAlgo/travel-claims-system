@@ -7,8 +7,7 @@ import Dashboard from './components/Dashboard';
 import NewClaim from './components/NewClaim';
 import MyClaims from './components/MyClaims';
 import SupervisorQueue from './components/SupervisorQueue';
-import HRSQueue from './components/HRSQueue';
-import { ECMQueue, DMCQueue } from './components/Queues';
+import InternalHRQueue from './components/HRSQueue';
 import Tariffs from './components/Tariffs';
 import Reports from './components/Reports';
 import AuditLog from './components/AuditLog';
@@ -19,19 +18,17 @@ import { api } from './utils/api';
 const ROLE_PAGES = {
   official:   ['dashboard', 'new-claim', 'my-claims'],
   supervisor: ['dashboard', 'supervisor'],
-  hrs:        ['dashboard', 'hrs', 'ecm'],
-  ecm:        ['dashboard', 'ecm'],
-  dmc:        ['dashboard', 'dmc'],
+  hrs:        ['dashboard', 'hrs'],
   admin:      ['dashboard', 'tariffs', 'reports', 'audit'],
 };
 
 function AppShell() {
   const { user, logout } = useAuth();
-  const [page, setPage]             = useState((ROLE_PAGES[user?.role] || ['dashboard'])[0]);
-  const [claims, setClaims]         = useState([]);
-  const [loading, setLoading]       = useState(true);
-  const [toastMsg, setToastMsg]     = useState('');
-  const [toastVisible, setToastVisible] = useState(false);
+  const [page, setPage]                   = useState((ROLE_PAGES[user?.role] || ['dashboard'])[0]);
+  const [claims, setClaims]               = useState([]);
+  const [loading, setLoading]             = useState(true);
+  const [toastMsg, setToastMsg]           = useState('');
+  const [toastVisible, setToastVisible]   = useState(false);
   const [selectedClaim, setSelectedClaim] = useState(null);
 
   const toast = useCallback((msg) => {
@@ -48,15 +45,11 @@ function AppShell() {
   }, [toast]);
 
   const allowed = ROLE_PAGES[user?.role] || ['dashboard'];
-
-  function onNav(id) {
-    if (allowed.includes(id)) setPage(id);
-  }
+  function onNav(id) { if (allowed.includes(id)) setPage(id); }
 
   async function updateStatus(ref, newStatus, extra = {}) {
     const updated = await api.updateStatus(ref, newStatus, extra);
     setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-    // Keep modal in sync if it's open on this claim
     setSelectedClaim(prev => (prev?.ref === ref ? updated : prev));
     return updated;
   }
@@ -65,7 +58,6 @@ function AppShell() {
     my:  claims.filter(c => c.persal === user?.persal).length,
     sup: claims.filter(c => c.status === 'pending').length,
     hrs: claims.filter(c => c.status === 'approved').length,
-    ecm: claims.filter(c => c.status === 'ecm').length,
   };
 
   function renderPage() {
@@ -92,19 +84,15 @@ function AppShell() {
                 const created = await api.createClaim(claim);
                 setClaims(prev => [created, ...prev]);
                 onNav('my-claims');
-                toast(`Claim ${created.ref} submitted to supervisor`);
-              } catch (err) {
-                toast('Error: ' + err.message);
-              }
+                toast(`Claim ${created.ref} submitted — your supervisor has been notified`);
+              } catch (err) { toast('Error: ' + err.message); }
             }}
             onSaveDraft={async claim => {
               try {
                 const created = await api.createClaim({ ...claim, status: 'draft' });
                 setClaims(prev => [created, ...prev]);
                 toast('Draft saved as ' + created.ref);
-              } catch (err) {
-                toast('Error: ' + err.message);
-              }
+              } catch (err) { toast('Error: ' + err.message); }
             }}
             toast={toast}
           />
@@ -116,6 +104,13 @@ function AppShell() {
             claims={claims.filter(c => c.persal === user?.persal)}
             onNav={onNav}
             onViewClaim={setSelectedClaim}
+            onRespondInfo={async (ref, message, docLinks) => {
+              try {
+                const updated = await api.respondInfo(ref, message, docLinks);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — response submitted. Internal HR has been notified.`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
             toast={toast}
           />
         );
@@ -128,13 +123,13 @@ function AppShell() {
             onApprove={async ref => {
               try {
                 await updateStatus(ref, 'approved');
-                toast(ref + ' approved — sent to HRS Payroll');
+                toast(`${ref} approved — Internal HR notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onReject={async ref => {
               try {
                 await updateStatus(ref, 'rejected');
-                toast(ref + ' rejected — official notified');
+                toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />
@@ -142,48 +137,21 @@ function AppShell() {
 
       case 'hrs':
         return (
-          <HRSQueue
+          <InternalHRQueue
             claims={claims}
             onViewClaim={setSelectedClaim}
-            onCapture={async ref => {
-              const mandate = 'MAN-2026-0' + (Math.floor(Math.random() * 90) + 10);
-              try {
-                await updateStatus(ref, 'ecm', { mandate });
-                toast(ref + ' captured on Persal — mandate ' + mandate + ' uploaded to ECM');
-              } catch (err) { toast('Error: ' + err.message); }
-            }}
-            onReject={async ref => {
-              try {
-                await updateStatus(ref, 'rejected');
-                toast(ref + ' rejected — returned to official');
-              } catch (err) { toast('Error: ' + err.message); }
-            }}
-          />
-        );
-
-      case 'ecm':
-        return (
-          <ECMQueue
-            claims={claims}
-            onViewClaim={setSelectedClaim}
-            onRoute={async ref => {
-              try {
-                await updateStatus(ref, 'routed');
-                toast(ref + ' mandate routed to DMC Payroll Team Leader');
-              } catch (err) { toast('Error: ' + err.message); }
-            }}
-          />
-        );
-
-      case 'dmc':
-        return (
-          <DMCQueue
-            claims={claims}
-            onViewClaim={setSelectedClaim}
-            onPaid={async ref => {
+            onPay={async ref => {
               try {
                 await updateStatus(ref, 'paid');
-                toast(ref + ' successfully paid — Persal verification confirmed');
+                toast(`${ref} marked as paid — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRequestInfo={async (ref, message) => {
+              try {
+                const updated = await api.requestInfo(ref, message);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                setSelectedClaim(prev => prev?.ref === ref ? updated : prev);
+                toast(`${ref} — information request sent to official`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />

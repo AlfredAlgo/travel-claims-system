@@ -290,21 +290,20 @@ function SupervisorDashboard({ claims }) {
 
 function HRSDashboard({ claims }) {
   const toCapture = claims.filter(c => c.status === 'approved');
-  const inEcm     = claims.filter(c => ['ecm','routed'].includes(c.status));
+  const infoReq   = claims.filter(c => c.status === 'info_requested');
   const monthly   = getMonthlyData(claims);
   const stages    = [
-    { name: 'Approved',   value: toCapture.length, fill: C.green },
-    { name: 'ECM upload', value: claims.filter(c => c.status === 'ecm').length, fill: C.purple },
-    { name: 'Routed',     value: claims.filter(c => c.status === 'routed').length, fill: C.blue },
-    { name: 'Paid',       value: claims.filter(c => c.status === 'paid').length, fill: C.teal },
+    { name: 'Approved',      value: toCapture.length, fill: C.green },
+    { name: 'Info requested', value: infoReq.length,  fill: C.purple },
+    { name: 'Paid',          value: claims.filter(c => c.status === 'paid').length, fill: C.teal },
   ];
 
   return (
     <>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: '1.5rem' }}>
-        <GradMetric label="To capture" value={toCapture.length} sub="Approved claims" color={C.green} />
-        <GradMetric label="In ECM/routing" value={inEcm.length} sub="Mandate uploaded" color={C.purple} />
-        <GradMetric label="Paid" value={claims.filter(c => c.status === 'paid').length} sub="Confirmed" color={C.teal} />
+        <GradMetric label="Ready to process" value={toCapture.length}                                   sub="Approved claims"   color={C.green} />
+        <GradMetric label="Info requested"   value={infoReq.length}                                     sub="Awaiting response" color={C.purple} />
+        <GradMetric label="Paid"             value={claims.filter(c => c.status === 'paid').length}      sub="Confirmed"        color={C.teal} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
@@ -493,9 +492,7 @@ export default function Dashboard({ claims, onNav, user }) {
       {role === 'official'   && <OfficialDashboard   claims={claims} persal={user?.persal} onNav={onNav} />}
       {role === 'supervisor' && <SupervisorDashboard claims={claims} />}
       {role === 'hrs'        && <HRSDashboard        claims={claims} />}
-      {role === 'ecm'        && <ECMDashboard        claims={claims} />}
-      {role === 'dmc'        && <DMCDashboard        claims={claims} />}
-      {role === 'admin'      && <AdminDashboard      claims={claims} />}
+          {role === 'admin'      && <AdminDashboard      claims={claims} />}
     </div>
   );
 }
