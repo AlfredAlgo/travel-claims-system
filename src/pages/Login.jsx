@@ -68,12 +68,14 @@ export default function Login() {
 
         {/* Logo */}
         <div style={{ marginBottom: '2.5rem', position: 'relative' }}>
-          <img
-            src="/gpg-logo.png"
-            alt="Gauteng Province Education"
-            style={{ height: 72, maxWidth: '100%', objectFit: 'contain', filter: 'brightness(0) invert(1)' }}
-            onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
-          />
+          <div style={{ display: 'inline-block', background: '#fff', borderRadius: 8, padding: '6px 12px' }}>
+            <img
+              src="/gpg-logo.png"
+              alt="Gauteng Province Education"
+              style={{ height: 60, maxWidth: 220, objectFit: 'contain', display: 'block' }}
+              onError={e => { e.target.parentElement.style.display = 'none'; e.target.parentElement.nextSibling.style.display = 'flex'; }}
+            />
+          </div>
           {/* Fallback if image missing */}
           <div style={{ display: 'none', alignItems: 'center', gap: 14 }}>
             <svg width="52" height="52" viewBox="0 0 52 52" fill="none">
