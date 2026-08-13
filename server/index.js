@@ -44,7 +44,23 @@ async function sendEmail({ to, subject, html }) {
   }
 }
 
+// Which optional columns exist in the DB (set at startup by detectDbCapabilities)
+const DB_CAPS = { userEmail: false, infoMessage: false, docLinks: false };
+
+async function detectDbCapabilities() {
+  const [r1, r2, r3] = await Promise.all([
+    supabase.from('users').select('email').limit(0),
+    supabase.from('claim_status_history').select('info_message').limit(0),
+    supabase.from('claims').select('doc_links').limit(0),
+  ]);
+  DB_CAPS.userEmail   = !r1.error;
+  DB_CAPS.infoMessage = !r2.error;
+  DB_CAPS.docLinks    = !r3.error;
+  console.log('DB capabilities:', DB_CAPS);
+}
+
 async function getEmailsByRole(role) {
+  if (!DB_CAPS.userEmail) return [];
   const { data } = await supabase.from('users').select('email').eq('role', role);
   return (data || []).map(u => u.email).filter(Boolean);
 }
@@ -208,7 +224,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
       amount:       body.amount       || 0,
       status:       isDraft ? 'draft' : 'pending',
       docs:         body.docs         || [],
-      doc_links:    body.docLinks     || [],
+      ...(DB_CAPS.docLinks && { doc_links: body.docLinks || [] }),
       advance:      body.advance      || false,
       adv_a:        body.advA         || 0,
       adv_b:        body.advB         || 0,
@@ -274,9 +290,10 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   const { status, note } = req.body;
   const { user } = req;
 
+  const userSel = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
   const { data: existing, error: fetchErr } = await supabase
     .from('claims')
-    .select('id, status, name, persal, dept, purpose, amount, user_id, users(name, email)')
+    .select(`id, status, name, persal, dept, purpose, amount, user_id, ${userSel}`)
     .eq('ref', ref)
     .single();
 
@@ -284,7 +301,7 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   // When official responds to info request, attach new doc_links
   const updates = { status };
-  if (req.body.docLinks !== undefined) updates.doc_links = req.body.docLinks;
+  if (DB_CAPS.docLinks && req.body.docLinks !== undefined) updates.doc_links = req.body.docLinks;
 
   const { data: updated, error } = await supabase
     .from('claims')
@@ -373,9 +390,10 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
   const { message } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
 
+  const userSel2 = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
   const { data: existing, error: fetchErr } = await supabase
     .from('claims')
-    .select('id, status, name, persal, purpose, amount, user_id, users(name, email)')
+    .select(`id, status, name, persal, purpose, amount, user_id, ${userSel2}`)
     .eq('ref', ref)
     .single();
 
@@ -399,7 +417,7 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
     to_status:    'info_requested',
     changed_by:   req.user.id,
     note:         message,
-    info_message: message,
+    ...(DB_CAPS.infoMessage && { info_message: message }),
   });
 
   // Notify official
@@ -443,7 +461,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   }
 
   const updates = { status: 'approved' };
-  if (docLinks) updates.doc_links = docLinks;
+  if (DB_CAPS.docLinks && docLinks) updates.doc_links = docLinks;
 
   const { data: updated, error } = await supabase
     .from('claims')
@@ -460,7 +478,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
     to_status:    'approved',
     changed_by:   req.user.id,
     note:         message || 'Additional information provided',
-    info_message: message || '',
+    ...(DB_CAPS.infoMessage && { info_message: message || '' }),
   });
 
   // Notify Internal HR
@@ -489,9 +507,10 @@ app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
     .from('claims').select('id').eq('ref', req.params.ref).single();
   if (!claim) return res.status(404).json({ error: 'Claim not found' });
 
+  const histSel = `id, from_status, to_status, note${DB_CAPS.infoMessage ? ', info_message' : ''}, created_at, users(name, role)`;
   const { data, error } = await supabase
     .from('claim_status_history')
-    .select('id, from_status, to_status, note, info_message, created_at, users(name, role)')
+    .select(histSel)
     .eq('claim_id', claim.id)
     .order('created_at', { ascending: true });
 
@@ -504,9 +523,10 @@ app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
 app.get('/api/audit', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
 
+  const auditSel = `id, from_status, to_status, note${DB_CAPS.infoMessage ? ', info_message' : ''}, created_at, users(name, role), claims(ref, name, persal, dept)`;
   const { data, error } = await supabase
     .from('claim_status_history')
-    .select('id, from_status, to_status, note, info_message, created_at, users(name, role), claims(ref, name, persal, dept)')
+    .select(auditSel)
     .order('created_at', { ascending: false })
     .limit(500);
 
@@ -524,17 +544,35 @@ async function ensureUsersSeeded() {
   if (count && count > 0) return;
 
   const DEMO = [
-    { username: 'dlamini', password: 'pass123',  name: 'T. Dlamini', persal: '20482345', dept: 'GPG — Health',         role: 'official',    email: 'official@gpg-demo.gov.za'   },
-    { username: 'khumalo', password: 'pass123',  name: 'N. Khumalo', persal: '20481111', dept: 'GPG — Finance',        role: 'supervisor',  email: 'supervisor@gpg-demo.gov.za'  },
-    { username: 'sithole', password: 'pass123',  name: 'B. Sithole', persal: '20489876', dept: 'GPG — Internal HR',    role: 'hrs',         email: 'internalhr@gpg-demo.gov.za'  },
-    { username: 'admin',   password: 'admin123', name: 'Admin User', persal: '',         dept: 'GPG — System Admin',   role: 'admin',       email: 'admin@gpg-demo.gov.za'       },
+    { username: 'dlamini', password: 'pass123',  name: 'T. Dlamini', persal: '20482345', dept: 'GPG — Health',       role: 'official'   },
+    { username: 'khumalo', password: 'pass123',  name: 'N. Khumalo', persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor' },
+    { username: 'sithole', password: 'pass123',  name: 'B. Sithole', persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs'        },
+    { username: 'admin',   password: 'admin123', name: 'Admin User', persal: '',         dept: 'GPG — System Admin', role: 'admin'      },
   ];
-  await supabase.from('users').insert(DEMO);
-  console.log('Demo users seeded.');
+
+  const { error } = await supabase.from('users').insert(DEMO);
+  if (error) {
+    console.error('Failed to seed demo users:', error.message);
+  } else {
+    console.log('Demo users seeded.');
+    // Backfill emails if column exists
+    if (DB_CAPS.userEmail) {
+      const emails = [
+        { username: 'dlamini', email: 'official@gpg-demo.gov.za'   },
+        { username: 'khumalo', email: 'supervisor@gpg-demo.gov.za'  },
+        { username: 'sithole', email: 'internalhr@gpg-demo.gov.za'  },
+        { username: 'admin',   email: 'admin@gpg-demo.gov.za'       },
+      ];
+      for (const { username, email } of emails) {
+        await supabase.from('users').update({ email }).eq('username', username);
+      }
+    }
+  }
 }
 
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, async () => {
   console.log(`GPG Travel Claims API → http://localhost:${PORT}`);
+  await detectDbCapabilities();
   await ensureUsersSeeded();
 });
