@@ -199,6 +199,19 @@ app.post('/api/claims', requireAuth, async (req, res) => {
   const trips   = body.trips || [];
   const isDraft = body.status === 'draft';
 
+  // TC-012: server-side required field validation
+  const missing = [];
+  if (!body.name?.trim())    missing.push('name');
+  if (!body.persal?.trim())  missing.push('persal');
+  if (!body.purpose?.trim()) missing.push('purpose');
+  if (!isDraft) {
+    if (!body.reg?.trim())   missing.push('reg');
+    if (trips.length === 0)  missing.push('trips');
+  }
+  if (missing.length > 0) {
+    return res.status(400).json({ error: 'Missing required fields', fields: missing });
+  }
+
   const year = new Date().getFullYear();
   const ref  = `TC-${year}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
 
@@ -254,6 +267,13 @@ app.post('/api/claims', requireAuth, async (req, res) => {
     if (tripErr) return res.status(500).json({ error: tripErr.message });
   }
 
+  // TC-009: re-fetch with trips so the response includes the inserted legs
+  const { data: claimWithTrips } = await supabase
+    .from('claims')
+    .select('*, trips(*)')
+    .eq('id', claim.id)
+    .single();
+
   await supabase.from('claim_status_history').insert({
     claim_id:    claim.id,
     from_status: null,
@@ -282,7 +302,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
     });
   }
 
-  res.status(201).json(normalizeClaim({ ...claim, trips: [], doc_links: body.docLinks || [] }));
+  res.status(201).json(normalizeClaim(claimWithTrips || { ...claim, trips: [], doc_links: body.docLinks || [] }));
 });
 
 app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
@@ -298,6 +318,18 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
     .single();
 
   if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
+
+  // TC-036: enforce role-based transition rules
+  const ALLOWED = {
+    approved:  ['supervisor'],
+    rejected:  ['supervisor'],
+    paid:      ['hrs'],
+    pending:   ['official'],
+  };
+  const allowedRoles = ALLOWED[status];
+  if (!allowedRoles || !allowedRoles.includes(user.role)) {
+    return res.status(403).json({ error: 'Forbidden: your role cannot set this status' });
+  }
 
   // When official responds to info request, attach new doc_links
   const updates = { status };
