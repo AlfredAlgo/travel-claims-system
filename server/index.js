@@ -5,6 +5,8 @@ const cors = require('cors');
 const nodemailer = require('nodemailer');
 const { createClient } = require('@supabase/supabase-js');
 
+const path = require('path');
+
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'gpg-travel-dev-secret-change-in-prod';
 
@@ -13,7 +15,8 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-app.use(cors({ origin: 'http://localhost:3000', credentials: true }));
+const isProd = process.env.NODE_ENV === 'production';
+app.use(cors(isProd ? {} : { origin: 'http://localhost:3000', credentials: true }));
 app.use(express.json());
 
 // ── Email service ────────────────────────────────────────────────────────────
@@ -565,6 +568,14 @@ app.get('/api/audit', requireAuth, async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
+
+// ── Serve React build in production ─────────────────────────────────────────
+
+if (isProd) {
+  const buildDir = path.join(__dirname, '..', 'build');
+  app.use(express.static(buildDir));
+  app.get(/(.*)/, (req, res) => res.sendFile(path.join(buildDir, 'index.html')));
+}
 
 // ── Startup ──────────────────────────────────────────────────────────────────
 
