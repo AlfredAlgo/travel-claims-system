@@ -41,12 +41,14 @@ const FY_MONTHS = [
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function exportCSV(rows) {
-  const cols = ['Ref', 'Official', 'Persal', 'Dept', 'Purpose', 'Date From', 'Date To', 'KM', 'Amount', 'Status', 'Mandate'];
+  const cols = ['Ref', 'Official', 'Persal', 'Dept', 'Purpose', 'Date From', 'Date To', 'KM', 'Amount', 'Status', 'Vehicle Category', 'Fuel Type', 'Engine Band', 'Tariff R/km', 'Circular Ref', 'Mandate'];
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const lines = [cols.join(','), ...rows.map(c => [
     esc(c.ref), esc(c.name), esc(c.persal), esc(c.dept),
     esc(c.purpose), esc(c.dateFrom), esc(c.dateTo),
-    esc(c.km), esc(c.amount?.toFixed(2)), esc(c.status), esc(c.mandate || ''),
+    esc(c.km), esc(c.amount?.toFixed(2)), esc(c.status),
+    esc(c.vehicleCategory || ''), esc(c.fuelType || ''), esc(c.engineBand || c.weightBand || ''),
+    esc(c.tariffRate || ''), esc(c.persalRef || ''), esc(c.mandate || ''),
   ].join(','))];
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -54,6 +56,25 @@ function exportCSV(rows) {
   a.download = `gpg-travel-claims-${new Date().toISOString().slice(0, 10)}.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// ── Excel export ──────────────────────────────────────────────────────────────
+async function exportExcel(rows, fy) {
+  const XLSX = await import('xlsx');
+  const header = ['Ref', 'Official', 'Persal', 'Department', 'Purpose', 'Date From', 'Date To', 'KM', 'Amount (R)', 'Status', 'Vehicle Category', 'Fuel Type', 'Engine Band', 'Tariff (R/km)', 'Circular Ref', 'Late Submission', 'Persal Mandate'];
+  const data = rows.map(c => [
+    c.ref, c.name, c.persal, c.dept, c.purpose,
+    c.dateFrom, c.dateTo, parseFloat(c.km || 0), parseFloat(c.amount || 0),
+    STATUS_META[c.status]?.label || c.status,
+    c.vehicleCategory || '', c.fuelType || '', c.engineBand || c.weightBand || '',
+    parseFloat(c.tariffRate || 0), c.persalRef || '',
+    c.isLateSubmission ? 'Yes' : 'No', c.mandate || '',
+  ]);
+  const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
+  ws['!cols'] = [{ wch: 14 }, { wch: 22 }, { wch: 10 }, { wch: 28 }, { wch: 36 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 16 }, { wch: 10 }, { wch: 10 }, { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 16 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, fy ? `FY ${fy}` : 'All Claims');
+  XLSX.writeFile(wb, `gpg-travel-claims-${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 // ── PDF export ────────────────────────────────────────────────────────────────
@@ -235,10 +256,13 @@ export default function Reports({ claims, toast }) {
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <Btn onClick={() => exportCSV(filtered)}>
-            <i className="ti ti-download" style={{ fontSize: 15 }} /> Export CSV
+            <i className="ti ti-download" style={{ fontSize: 15 }} /> CSV
+          </Btn>
+          <Btn onClick={() => exportExcel(filtered, fy).catch(e => toast('Excel error: ' + e.message))}>
+            <i className="ti ti-file-type-xls" style={{ fontSize: 15 }} /> Excel
           </Btn>
           <Btn onClick={() => exportPDF(filtered, activeFilters, summary).catch(e => toast('PDF error: ' + e.message))}>
-            <i className="ti ti-file-type-pdf" style={{ fontSize: 15 }} /> Export PDF
+            <i className="ti ti-file-type-pdf" style={{ fontSize: 15 }} /> PDF
           </Btn>
         </div>
       </div>

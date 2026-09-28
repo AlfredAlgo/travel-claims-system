@@ -3,148 +3,337 @@ import { StatusBadge, Btn } from './Shared';
 import { STATUS_META, TARIFFS, ST_CODES, VEHICLE_CATEGORIES } from '../data/constants';
 import { api, attachmentUrl } from '../utils/api';
 
-// ── PDF export ───────────────────────────────────────────────────────────────
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+const BLUE      = [24, 95, 165];
+const BLUE_LIGHT = [230, 241, 251];
+const WHITE     = [255, 255, 255];
+const BLACK     = [0, 0, 0];
+const GRAY      = [120, 120, 120];
+
+function pdfHeader(doc, claim) {
+  doc.setFillColor(...BLUE);
+  doc.rect(0, 0, 210, 24, 'F');
+  doc.setTextColor(...WHITE);
+  doc.setFontSize(13); doc.setFont(undefined, 'bold');
+  doc.text('GAUTENG PROVINCIAL GOVERNMENT', 105, 8, { align: 'center' });
+  doc.setFontSize(9.5); doc.setFont(undefined, 'normal');
+  doc.text('TRAVEL & SUBSISTENCE CLAIM  —  Z 584', 105, 14.5, { align: 'center' });
+  doc.setFontSize(7.5);
+  doc.text(`Ref: ${claim.ref}   ·   Status: ${STATUS_META[claim.status]?.label || claim.status}   ·   Submitted: ${(claim.createdAt || '').slice(0, 10)}`, 105, 21, { align: 'center' });
+  doc.setTextColor(...BLACK);
+}
+
+function sectionLabel(doc, y, text) {
+  doc.setFillColor(...BLUE_LIGHT);
+  doc.rect(14, y - 4, 182, 5.5, 'F');
+  doc.setFontSize(7.5); doc.setFont(undefined, 'bold');
+  doc.setTextColor(...BLUE);
+  doc.text(text, 16, y);
+  doc.setTextColor(...BLACK); doc.setFont(undefined, 'normal');
+  return y + 3;
+}
+
+function signBlock(doc, x, y, w, role) {
+  doc.setFillColor(248, 250, 252);
+  doc.rect(x, y, w, 28, 'F');
+  doc.setDrawColor(200, 210, 220); doc.rect(x, y, w, 28, 'S');
+  doc.setFontSize(7.5); doc.setFont(undefined, 'bold');
+  doc.setTextColor(...BLUE); doc.text(role, x + 2, y + 5);
+  doc.setTextColor(100); doc.setFont(undefined, 'normal'); doc.setFontSize(7);
+  doc.text('Signature:', x + 2, y + 13);
+  doc.setDrawColor(160); doc.line(x + 20, y + 13, x + w - 3, y + 13);
+  doc.text('Name:', x + 2, y + 19);
+  doc.line(x + 14, y + 19, x + w - 3, y + 19);
+  doc.text('Date:', x + 2, y + 25);
+  doc.line(x + 14, y + 25, x + w - 3, y + 25);
+  doc.setTextColor(...BLACK);
+}
+
+// ── PDF export (Z 584 — Sheet 1 + Sheet 2) ──────────────────────────────────
 
 async function downloadPDF(claim, history) {
   const { default: jsPDF } = await import('jspdf');
   const { default: autoTable } = await import('jspdf-autotable');
 
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const th  = { fillColor: BLUE_LIGHT, textColor: BLUE, fontStyle: 'bold', fontSize: 7.5 };
+  const tbl = { theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 }, headStyles: th };
 
-  // Header bar
-  doc.setFillColor(24, 95, 165);
-  doc.rect(0, 0, 210, 22, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFontSize(14); doc.setFont(undefined, 'bold');
-  doc.text('GAUTENG PROVINCIAL GOVERNMENT', 105, 9, { align: 'center' });
-  doc.setFontSize(9); doc.setFont(undefined, 'normal');
-  doc.text('Persal Travel & Subsistence Claim — Z 584', 105, 16, { align: 'center' });
-  doc.setTextColor(0, 0, 0);
+  // ── PAGE 1 — Sheet 1 ─────────────────────────────────────────────────────
+  pdfHeader(doc, claim);
 
-  // Ref line
-  doc.setFontSize(9);
-  doc.text(`Claim Ref: ${claim.ref}`, 14, 29);
-  doc.text(`Status: ${STATUS_META[claim.status]?.label || claim.status}`, 90, 29);
-  doc.text(`Submitted: ${(claim.createdAt || '').slice(0, 10)}`, 155, 29);
-
-  const th = { fillColor: [230, 241, 251], textColor: [24, 95, 165], fontStyle: 'bold', fontSize: 8 };
-
-  // Claimant details
+  // A. Employee details
+  sectionLabel(doc, 31, 'A — CLAIMANT / EMPLOYEE DETAILS');
   autoTable(doc, {
+    ...tbl,
     startY: 34,
-    head: [['CLAIMANT DETAILS', '', '', '']],
     body: [
-      ['Surname & Initials', claim.name, 'Persal Number', claim.persal],
-      ['Department', claim.dept || '—', 'Contact', claim.contact || '—'],
-      ['Phone', claim.phone || '—', 'Advance Taken', claim.advance ? `Yes (R ${(claim.advA||0).toFixed(2)} advance)` : 'No'],
+      ['Surname & Initials', claim.name || '—', 'Persal Number', claim.persal || '—'],
+      ['Business Unit / Dept', claim.dept || '—', 'Phone / Contact', claim.phone || claim.contact || '—'],
+      ['Post level / Rank', claim.sigRank || '—', 'Period of travel', (() => {
+        const dates = (claim.trips || []).map(t => t.dateFrom).filter(Boolean).sort();
+        return dates.length ? `${dates[0]} to ${dates[dates.length - 1]}` : '—';
+      })()],
     ],
-    theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 },
-    headStyles: th,
-    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 42 }, 2: { fontStyle: 'bold', cellWidth: 42 } },
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] }, 2: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] } },
   });
 
-  // Vehicle details
-  const isNewVehicle = !!claim.vehicleCategory;
-  const vehicleBody = isNewVehicle ? [
-    ['Vehicle Category', VEHICLE_CATEGORIES.find(c => c.value === claim.vehicleCategory)?.label || claim.vehicleCategory, 'Registration', claim.reg || '—'],
-    ['Fuel Type', claim.fuelType || '—', 'Engine/Weight Band', claim.engineBand || claim.weightBand || '—'],
-    ['Tariff Rate', `R ${parseFloat(claim.tariffRate || 0).toFixed(4)}/km`, 'Circular / Persal Ref', claim.persalRef || '—'],
-    ['Reimbursement Scheme', claim.reimbursementScheme || '—', 'Late Submission', claim.isLateSubmission ? 'Yes' : 'No'],
+  // B. Advance
+  const advA = claim.advance ? (claim.advA || 0) : 0;
+  const advB = claim.advance ? (claim.advB || 0) : 0;
+  const advC = claim.advance ? (claim.advC || 0) : 0;
+  let y = doc.lastAutoTable.finalY + 5;
+  sectionLabel(doc, y, 'B — ADVANCE (Regulation R.195)');
+  autoTable(doc, {
+    ...tbl,
+    startY: y + 3,
+    body: [
+      ['A. Total advance drawn', `R ${advA.toFixed(2)}`, 'B. Amount repaid to cashier', `R ${advB.toFixed(2)}`],
+      [{ content: 'C. Balance outstanding (A − B)', colSpan: 1 }, { content: `R ${advC.toFixed(2)}`, colSpan: 1 }, { content: 'Advance taken?', colSpan: 1 }, { content: claim.advance ? 'Yes' : 'No', colSpan: 1 }],
+    ],
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 70, fillColor: [245, 248, 252] }, 2: { fontStyle: 'bold', cellWidth: 50, fillColor: [245, 248, 252] } },
+  });
+
+  // C. Persal allocation — all ST codes
+  y = doc.lastAutoTable.finalY + 5;
+  sectionLabel(doc, y, 'C — PERSAL ALLOCATION — Function 5.3.11');
+  const allocBody = ST_CODES.map(s => {
+    const amt = parseFloat((claim.allocAmounts || {})[s.code] || 0);
+    return [s.code, s.desc, s.sars, amt > 0 ? `R ${amt.toFixed(2)}` : ''];
+  });
+  const allocTotal = Object.values(claim.allocAmounts || {}).reduce((a, v) => a + parseFloat(v || 0), 0);
+  autoTable(doc, {
+    ...tbl,
+    startY: y + 3,
+    head: [['Persal code', 'Description', 'SARS code', 'Amount (R)']],
+    body: [
+      ...allocBody,
+      [{ content: 'TOTAL CLAIM AMOUNT', colSpan: 3, styles: { fontStyle: 'bold', fillColor: BLUE_LIGHT } },
+       { content: `R ${allocTotal > 0 ? allocTotal.toFixed(2) : (claim.amount || 0).toFixed(2)}`, styles: { fontStyle: 'bold', halign: 'right', fillColor: BLUE_LIGHT } }],
+    ],
+    columnStyles: {
+      0: { cellWidth: 26, fontFamily: 'courier', fontSize: 7.5 },
+      2: { cellWidth: 22, halign: 'center' },
+      3: { cellWidth: 32, halign: 'right' },
+    },
+  });
+
+  // Financial summary — nett payable
+  const nett = (claim.amount || 0) - advC;
+  y = doc.lastAutoTable.finalY + 5;
+  autoTable(doc, {
+    ...tbl,
+    startY: y,
+    body: [
+      ['Total claim amount', `R ${(claim.amount || 0).toFixed(2)}`, 'Less: advance outstanding (C)', `R ${advC.toFixed(2)}`],
+      [{ content: 'NETT AMOUNT PAYABLE', styles: { fontStyle: 'bold', fillColor: BLUE_LIGHT } }, { content: `R ${nett.toFixed(2)}`, styles: { fontStyle: 'bold', halign: 'right', fillColor: BLUE_LIGHT } }, { content: 'Persal mandate', styles: { fillColor: [245, 248, 252] } }, { content: claim.mandate || '—', styles: { fillColor: [245, 248, 252] } }],
+    ],
+    columnStyles: { 0: { cellWidth: 70, fontStyle: 'bold', fillColor: [245, 248, 252] }, 2: { cellWidth: 50, fontStyle: 'bold', fillColor: [245, 248, 252] } },
+  });
+
+  // D. Certification / sign-off
+  y = doc.lastAutoTable.finalY + 6;
+  if (y > 230) { doc.addPage(); pdfHeader(doc, claim); y = 30; }
+  sectionLabel(doc, y, 'D — CERTIFICATION AND AUTHORISATION');
+  y += 4;
+  doc.setFontSize(7.5); doc.setFont(undefined, 'italic'); doc.setTextColor(80);
+  doc.text('I certify that I was actually and necessarily employed travelling on public service during the period stated above, and that the charges are correct and in accordance with the authorised tariff.', 14, y, { maxWidth: 182 });
+  doc.setFont(undefined, 'normal'); doc.setTextColor(...BLACK);
+  y += 8;
+  const bw = 57;
+  signBlock(doc, 14,        y, bw, 'OFFICIAL (Claimant)');
+  signBlock(doc, 14 + bw + 4, y, bw, 'SUPERVISOR / APPROVING OFFICER');
+  signBlock(doc, 14 + 2*(bw+4), y, bw, 'HRS / FINANCE AUTHORISATION');
+
+  // ── PAGE 2 — Sheet 2 ─────────────────────────────────────────────────────
+  doc.addPage();
+  pdfHeader(doc, claim);
+
+  // E. Vehicle details
+  sectionLabel(doc, 31, 'E — VEHICLE DETAILS');
+  const isNewV = !!claim.vehicleCategory;
+  const vehicleBody = isNewV ? [
+    ['Vehicle Category', VEHICLE_CATEGORIES.find(c => c.value === claim.vehicleCategory)?.label || claim.vehicleCategory, 'Registration No.', claim.reg || '—'],
+    ['Fuel Type', claim.fuelType || '—', 'Engine / Weight Band', claim.engineBand || claim.weightBand || '—'],
+    ['Tariff Rate (R/km)', `R ${parseFloat(claim.tariffRate || 0).toFixed(4)}`, 'DoT Circular Ref', claim.persalRef || '—'],
+    ['Reimbursement Scheme', claim.reimbursementScheme || '—', 'Late Submission', claim.isLateSubmission ? '⚠ Yes — letter attached' : 'No'],
   ] : [
-    ['Vehicle Type', claim.vehicleType === 'motor' ? 'Private Motor Vehicle' : 'Motorbike', 'Engine Capacity', TARIFFS[parseInt(claim.engineIdx)]?.engine || '—'],
-    ['Registration', claim.reg || '—', 'Annual KM Bracket', claim.kmBracket === 'more' ? '> 8 000 km/yr (R.469)' : '≤ 8 000 km/yr (R.470)'],
+    ['Vehicle Type', claim.vehicleType === 'motor' ? 'Private Motor Vehicle' : 'Motorbike', 'Registration No.', claim.reg || '—'],
+    ['Engine Capacity', TARIFFS[parseInt(claim.engineIdx)]?.engine || '—', 'Annual KM Bracket', claim.kmBracket === 'more' ? '> 8 000 km/yr (R.469)' : '≤ 8 000 km/yr (R.470)'],
   ];
   autoTable(doc, {
-    startY: doc.lastAutoTable.finalY + 4,
-    head: [['VEHICLE DETAILS', '', '', '']],
+    ...tbl,
+    startY: 34,
     body: vehicleBody,
-    theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 },
-    headStyles: th,
-    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 42 }, 2: { fontStyle: 'bold', cellWidth: 42 } },
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] }, 2: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] } },
   });
 
-  // Trip details
+  // F. Purpose & trip log
+  y = doc.lastAutoTable.finalY + 5;
+  sectionLabel(doc, y, `F — TRIP LOG   (Purpose: ${claim.purpose || '—'})`);
+  const rate = parseFloat(claim.tariffRate || 0);
+  const tripRows = (claim.trips || []).map((t, i) => {
+    const km  = parseFloat(t.km || 0);
+    const amt = rate > 0 ? (rate * km) : 0;
+    return [
+      i + 1,
+      t.dateFrom || '—',
+      t.dateTo   || '—',
+      t.origin   || '—',
+      t.dest     || '—',
+      t.reason   || claim.purpose || '—',
+      rate > 0 ? `R ${rate.toFixed(4)}` : '—',
+      `${km}`,
+      amt > 0 ? `R ${amt.toFixed(2)}` : '—',
+    ];
+  });
+  const totalKm  = (claim.trips || []).reduce((s, t) => s + parseFloat(t.km || 0), 0);
+  const totalAmt = claim.amount || (rate > 0 ? rate * totalKm : 0);
   autoTable(doc, {
-    startY: doc.lastAutoTable.finalY + 4,
-    head: [['TRIP DETAILS — Purpose: ' + (claim.purpose || '—'), '', '', '', '']],
+    ...tbl,
+    startY: y + 3,
+    head: [['#', 'Date\nFrom', 'Date\nTo', 'Departure', 'Destination', 'Reason / Purpose', 'Tariff\n(R/km)', 'KM', 'Amount\n(R)']],
     body: [
-      ...(claim.trips || []).map((t, i) => [`Trip ${i + 1}`, t.dateFrom || '—', `${t.origin} → ${t.dest}`, `${t.km} km`, '']),
-      [{ content: 'Log sheet ref', styles: { fontStyle: 'bold' } }, { content: claim.logsheet || '—', colSpan: 2 }, { content: 'TOTAL KM', styles: { fontStyle: 'bold' } }, `${claim.km} km`],
+      ...tripRows,
+      [
+        { content: 'TOTALS', colSpan: 7, styles: { fontStyle: 'bold', fillColor: BLUE_LIGHT, halign: 'right' } },
+        { content: `${totalKm}`, styles: { fontStyle: 'bold', fillColor: BLUE_LIGHT } },
+        { content: `R ${totalAmt.toFixed(2)}`, styles: { fontStyle: 'bold', fillColor: BLUE_LIGHT } },
+      ],
     ],
-    theme: 'striped', styles: { fontSize: 8, cellPadding: 2.5 },
-    headStyles: th,
+    columnStyles: {
+      0: { cellWidth: 7,  halign: 'center' },
+      1: { cellWidth: 18 },
+      2: { cellWidth: 18 },
+      3: { cellWidth: 25 },
+      4: { cellWidth: 25 },
+      5: { cellWidth: 45 },
+      6: { cellWidth: 18, halign: 'right' },
+      7: { cellWidth: 12, halign: 'right' },
+      8: { cellWidth: 22, halign: 'right' },
+    },
   });
 
-  // Persal allocation
-  const allocEntries = Object.entries(claim.allocAmounts || {}).filter(([, v]) => v > 0);
-  if (allocEntries.length > 0) {
-    autoTable(doc, {
-      startY: doc.lastAutoTable.finalY + 4,
-      head: [['PERSAL ALLOCATION (Function 5.3.11)', '', '']],
-      body: allocEntries.map(([code, amt]) => {
-        const st = ST_CODES.find(s => s.code === code);
-        return [code, st?.desc || '—', `R ${parseFloat(amt).toFixed(2)}`];
-      }),
-      theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 },
-      headStyles: th,
-      columnStyles: { 0: { cellWidth: 22, fontFamily: 'courier' }, 2: { cellWidth: 30, halign: 'right' } },
-    });
-  }
-
-  // Financial summary
-  const nett = (claim.amount || 0) - (claim.advance ? claim.advC || 0 : 0);
+  // G. Approved memo / supporting docs
+  y = doc.lastAutoTable.finalY + 5;
   autoTable(doc, {
-    startY: doc.lastAutoTable.finalY + 4,
-    head: [['FINANCIAL SUMMARY', '']],
+    ...tbl,
+    startY: y,
     body: [
-      ['Total claim amount', `R ${(claim.amount || 0).toFixed(2)}`],
-      ['Less: advance outstanding (C = A − B)', `R ${(claim.advance ? claim.advC || 0 : 0).toFixed(2)}`],
-      [{ content: 'Nett amount payable', styles: { fontStyle: 'bold' } }, { content: `R ${nett.toFixed(2)}`, styles: { fontStyle: 'bold' } }],
+      ['Approved memo ref', claim.logsheet || '—', 'Duplicate exception', claim.duplicateException ? `Yes — ${claim.duplicateExceptionNote || ''}` : 'No'],
+      ['Attachments', (claim.attachments || []).map(a => a.fileName).join(', ') || 'None', 'System ref', claim.ref],
     ],
-    theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 },
-    headStyles: th,
-    columnStyles: { 0: { cellWidth: 120 }, 1: { halign: 'right' } },
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] }, 2: { fontStyle: 'bold', cellWidth: 44, fillColor: [245, 248, 252] } },
   });
 
-  // Status history
+  // H. Status history
   if (history.length > 0) {
-    let y = doc.lastAutoTable.finalY + 4;
-    if (y > 245) { doc.addPage(); y = 14; }
+    y = doc.lastAutoTable.finalY + 5;
+    if (y > 240) { doc.addPage(); pdfHeader(doc, claim); y = 30; }
+    sectionLabel(doc, y, 'H — WORKFLOW HISTORY');
     autoTable(doc, {
-      startY: y,
-      head: [['STATUS HISTORY', '', '', '']],
+      ...tbl,
+      startY: y + 3,
+      head: [['Date / Time', 'Transition', 'Actor', 'Note']],
       body: history.map(h => [
         new Date(h.created_at).toLocaleString('en-ZA'),
         `${STATUS_META[h.from_status]?.label || '—'} → ${STATUS_META[h.to_status]?.label || h.to_status}`,
         h.users?.name || '—',
         h.note || '—',
       ]),
-      theme: 'striped', styles: { fontSize: 7.5, cellPadding: 2 },
+      styles: { fontSize: 7.5, cellPadding: 2 },
       headStyles: th,
     });
   }
 
-  // Certificate block
-  let y = doc.lastAutoTable.finalY + 6;
-  if (y > 255) { doc.addPage(); y = 14; }
-  doc.setFontSize(8); doc.setFont(undefined, 'italic');
-  doc.setTextColor(80);
-  doc.text('I certify that I was actually and necessarily employed travelling on public service during the period stated above and that the charges are in accordance with the authorised rate.', 14, y, { maxWidth: 182 });
-  doc.setFont(undefined, 'normal'); doc.setTextColor(0);
-  doc.text(`Signed: ${claim.sigName || '—'}`, 14, y + 10);
-  doc.text(`Rank: ${claim.sigRank || '—'}`, 80, y + 10);
-  doc.text(`Date: ${claim.sigDate || '—'}`, 150, y + 10);
-  if (claim.mandate) { doc.text(`Persal mandate: ${claim.mandate}`, 14, y + 16); }
-
-  // Footer on every page
-  const total = doc.internal.getNumberOfPages();
-  for (let i = 1; i <= total; i++) {
+  // Footer every page
+  const pages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
     doc.setPage(i);
-    doc.setFontSize(7); doc.setTextColor(160);
-    doc.text(`GPG Persal Travel Claims · ${claim.ref} · Page ${i} of ${total}`, 105, 292, { align: 'center' });
+    doc.setFontSize(6.5); doc.setTextColor(...GRAY);
+    doc.text(`GPG Persal T&S Claims  ·  ${claim.ref}  ·  ${i === 1 ? 'Sheet 1 — Allocation & Certification' : i === 2 ? 'Sheet 2 — Vehicle & Trip Log' : `Sheet ${i}`}  ·  Page ${i} of ${pages}`, 105, 293, { align: 'center' });
   }
 
   doc.save(`${claim.ref}.pdf`);
+}
+
+// ── Excel export ─────────────────────────────────────────────────────────────
+
+async function downloadExcel(claim) {
+  const XLSX = await import('xlsx');
+
+  // Sheet 1 — Claim summary
+  const isNewV = !!claim.vehicleCategory;
+  const totalKm = (claim.trips || []).reduce((s, t) => s + parseFloat(t.km || 0), 0);
+  const rate    = parseFloat(claim.tariffRate || 0);
+  const totalAmt = claim.amount || (rate > 0 ? rate * totalKm : 0);
+  const advC    = claim.advance ? (claim.advC || 0) : 0;
+
+  const summaryRows = [
+    ['GAUTENG PROVINCIAL GOVERNMENT — TRAVEL & SUBSISTENCE CLAIM (Z 584)'],
+    [],
+    ['Claim Reference', claim.ref],
+    ['Status',          STATUS_META[claim.status]?.label || claim.status],
+    ['Submitted',       (claim.createdAt || '').slice(0, 10)],
+    [],
+    ['CLAIMANT DETAILS'],
+    ['Surname & Initials', claim.name],
+    ['Persal Number',      claim.persal],
+    ['Business Unit',      claim.dept],
+    ['Phone / Contact',    claim.phone || claim.contact],
+    ['Rank / Post level',  claim.sigRank],
+    [],
+    ['VEHICLE DETAILS'],
+    isNewV
+      ? ['Vehicle Category', VEHICLE_CATEGORIES.find(c => c.value === claim.vehicleCategory)?.label || claim.vehicleCategory]
+      : ['Vehicle Type', claim.vehicleType === 'motor' ? 'Private Motor Vehicle' : 'Motorbike'],
+    isNewV
+      ? ['Fuel Type', claim.fuelType]
+      : ['Engine Capacity', TARIFFS[parseInt(claim.engineIdx)]?.engine || '—'],
+    isNewV
+      ? ['Tariff Rate (R/km)', parseFloat(claim.tariffRate || 0)]
+      : ['Annual KM Bracket', claim.kmBracket === 'more' ? '> 8 000 km/yr' : '≤ 8 000 km/yr'],
+    isNewV ? ['DoT Circular Ref', claim.persalRef]   : ['Registration', claim.reg],
+    isNewV ? ['Reimbursement Scheme', claim.reimbursementScheme] : [],
+    ['Registration', claim.reg],
+    [],
+    ['FINANCIAL SUMMARY'],
+    ['Total Claim Amount',        totalAmt],
+    ['Less: Advance Outstanding', advC],
+    ['NETT AMOUNT PAYABLE',       totalAmt - advC],
+    [],
+    ['PERSAL ALLOCATION (Function 5.3.11)'],
+    ['Persal Code', 'Description', 'SARS Code', 'Amount (R)'],
+    ...ST_CODES.map(s => [s.code, s.desc, s.sars, parseFloat((claim.allocAmounts || {})[s.code] || 0)]),
+    [],
+    ['Approved Memo Ref', claim.logsheet],
+    ['Purpose', claim.purpose],
+    ['Late Submission', claim.isLateSubmission ? 'Yes' : 'No'],
+    ['Duplicate Exception', claim.duplicateException ? 'Yes' : 'No'],
+    claim.duplicateException ? ['Exception Note', claim.duplicateExceptionNote] : [],
+  ].filter(r => r.length > 0);
+
+  // Sheet 2 — Trip log
+  const tripHeader = ['#', 'Date From', 'Date To', 'Departure', 'Destination', 'Reason / Purpose', 'Tariff (R/km)', 'KM', 'Amount (R)'];
+  const tripRows = (claim.trips || []).map((t, i) => {
+    const km  = parseFloat(t.km || 0);
+    const amt = rate > 0 ? rate * km : 0;
+    return [i + 1, t.dateFrom, t.dateTo, t.origin, t.dest, t.reason || claim.purpose, rate || '', km, amt || ''];
+  });
+  const tripData = [tripHeader, ...tripRows, ['', '', '', '', '', '', 'TOTAL', totalKm, totalAmt]];
+
+  const wb = XLSX.utils.book_new();
+  const ws1 = XLSX.utils.aoa_to_sheet(summaryRows);
+  const ws2 = XLSX.utils.aoa_to_sheet(tripData);
+
+  // Column widths for trip sheet
+  ws2['!cols'] = [{ wch: 4 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 22 }, { wch: 36 }, { wch: 14 }, { wch: 8 }, { wch: 14 }];
+  ws1['!cols'] = [{ wch: 30 }, { wch: 50 }, { wch: 14 }, { wch: 14 }];
+
+  XLSX.utils.book_append_sheet(wb, ws1, 'Claim Summary');
+  XLSX.utils.book_append_sheet(wb, ws2, 'Trip Log');
+  XLSX.writeFile(wb, `${claim.ref}.xlsx`);
 }
 
 // ── Status timeline ──────────────────────────────────────────────────────────
@@ -196,7 +385,8 @@ function Timeline({ history, loading }) {
 export default function ClaimModal({ claim, onClose }) {
   const [history, setHistory]   = useState([]);
   const [loadingH, setLoadingH] = useState(false);
-  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfLoading,  setPdfLoading]  = useState(false);
+  const [xlsxLoading, setXlsxLoading] = useState(false);
   const [tab, setTab] = useState('details');
 
   useEffect(() => {
@@ -268,7 +458,19 @@ export default function ClaimModal({ claim, onClose }) {
             }}
           >
             <i className="ti ti-file-type-pdf" style={{ fontSize: 14 }} />
-            {pdfLoading ? 'Generating…' : 'Download PDF'}
+            {pdfLoading ? 'Generating…' : 'PDF'}
+          </Btn>
+          <Btn
+            size="sm"
+            disabled={xlsxLoading}
+            onClick={async () => {
+              setXlsxLoading(true);
+              await downloadExcel(claim).catch(() => {});
+              setXlsxLoading(false);
+            }}
+          >
+            <i className="ti ti-file-type-xls" style={{ fontSize: 14 }} />
+            {xlsxLoading ? 'Exporting…' : 'Excel'}
           </Btn>
           <button onClick={onClose} style={{
             width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center',
