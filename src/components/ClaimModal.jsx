@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { StatusBadge, Btn } from './Shared';
-import { STATUS_META, TARIFFS, ST_CODES } from '../data/constants';
-import { api } from '../utils/api';
+import { STATUS_META, TARIFFS, ST_CODES, VEHICLE_CATEGORIES } from '../data/constants';
+import { api, attachmentUrl } from '../utils/api';
 
 // ── PDF export ───────────────────────────────────────────────────────────────
 
@@ -44,14 +44,20 @@ async function downloadPDF(claim, history) {
   });
 
   // Vehicle details
-  const engineLabel = TARIFFS[parseInt(claim.engineIdx)]?.engine || '—';
+  const isNewVehicle = !!claim.vehicleCategory;
+  const vehicleBody = isNewVehicle ? [
+    ['Vehicle Category', VEHICLE_CATEGORIES.find(c => c.value === claim.vehicleCategory)?.label || claim.vehicleCategory, 'Registration', claim.reg || '—'],
+    ['Fuel Type', claim.fuelType || '—', 'Engine/Weight Band', claim.engineBand || claim.weightBand || '—'],
+    ['Tariff Rate', `R ${parseFloat(claim.tariffRate || 0).toFixed(4)}/km`, 'Circular / Persal Ref', claim.persalRef || '—'],
+    ['Reimbursement Scheme', claim.reimbursementScheme || '—', 'Late Submission', claim.isLateSubmission ? 'Yes' : 'No'],
+  ] : [
+    ['Vehicle Type', claim.vehicleType === 'motor' ? 'Private Motor Vehicle' : 'Motorbike', 'Engine Capacity', TARIFFS[parseInt(claim.engineIdx)]?.engine || '—'],
+    ['Registration', claim.reg || '—', 'Annual KM Bracket', claim.kmBracket === 'more' ? '> 8 000 km/yr (R.469)' : '≤ 8 000 km/yr (R.470)'],
+  ];
   autoTable(doc, {
     startY: doc.lastAutoTable.finalY + 4,
     head: [['VEHICLE DETAILS', '', '', '']],
-    body: [
-      ['Vehicle Type', claim.vehicleType === 'motor' ? 'Private Motor Vehicle' : 'Motorbike', 'Engine Capacity', engineLabel],
-      ['Registration', claim.reg || '—', 'Annual KM Bracket', claim.kmBracket === 'more' ? '> 8 000 km/yr (R.469)' : '≤ 8 000 km/yr (R.470)'],
-    ],
+    body: vehicleBody,
     theme: 'grid', styles: { fontSize: 8, cellPadding: 2.5 },
     headStyles: th,
     columnStyles: { 0: { fontStyle: 'bold', cellWidth: 42 }, 2: { fontStyle: 'bold', cellWidth: 42 } },
@@ -206,13 +212,18 @@ export default function ClaimModal({ claim, onClose }) {
   if (!claim) return null;
 
   const nett = (claim.amount || 0) - (claim.advance ? claim.advC || 0 : 0);
-  const engineLabel = TARIFFS[parseInt(claim.engineIdx)]?.engine || claim.engineIdx || '—';
+  // Support both old (engineIdx) and new (vehicleCategory) claims
+  const engineLabel = claim.vehicleCategory
+    ? VEHICLE_CATEGORIES.find(c => c.value === claim.vehicleCategory)?.label || claim.vehicleCategory
+    : (TARIFFS[parseInt(claim.engineIdx)]?.engine || claim.engineIdx || '—');
   const allocEntries = Object.entries(claim.allocAmounts || {}).filter(([, v]) => parseFloat(v) > 0);
+  const hasAttachments = (claim.attachments || []).length > 0;
 
   const TABS = [
     { id: 'details',  label: 'Details' },
     { id: 'trips',    label: `Trips (${(claim.trips || []).length})` },
     { id: 'amounts',  label: 'Amounts' },
+    ...(hasAttachments ? [{ id: 'files', label: `Files (${claim.attachments.length})` }] : []),
     { id: 'history',  label: `History (${history.length})` },
   ];
 
@@ -294,12 +305,34 @@ export default function ClaimModal({ claim, onClose }) {
                 <Row2 a="Phone" av={claim.phone} b="Advance" bv={claim.advance ? `Yes — R ${(claim.advA||0).toFixed(2)} advance` : 'No'} />
               </Section>
               <Section title="Vehicle">
-                <Row2 a="Type" av={claim.vehicleType === 'motor' ? 'Private motor vehicle' : 'Motorbike'} b="Engine" bv={engineLabel} />
-                <Row2 a="Registration" av={claim.reg || '—'} b="KM bracket" bv={claim.kmBracket === 'more' ? '> 8 000 km/yr' : '≤ 8 000 km/yr'} />
+                {claim.vehicleCategory ? (
+                  <>
+                    <Row2 a="Category" av={engineLabel} b="Registration" bv={claim.reg || '—'} />
+                    <Row2 a="Fuel type" av={claim.fuelType || '—'} b="Engine band" bv={claim.engineBand || claim.weightBand || '—'} />
+                    <Row2 a="Tariff rate" av={claim.tariffRate > 0 ? `R ${parseFloat(claim.tariffRate).toFixed(4)}/km` : '—'} b="Circular / Persal ref" bv={claim.persalRef || '—'} />
+                    <Row2 a="Scheme" av={claim.reimbursementScheme || '—'} b="KM" bv={`${claim.km} km`} />
+                  </>
+                ) : (
+                  <>
+                    <Row2 a="Type" av={claim.vehicleType === 'motor' ? 'Private motor vehicle' : 'Motorbike'} b="Engine" bv={engineLabel} />
+                    <Row2 a="Registration" av={claim.reg || '—'} b="KM bracket" bv={claim.kmBracket === 'more' ? '> 8 000 km/yr' : '≤ 8 000 km/yr'} />
+                  </>
+                )}
+                {claim.isLateSubmission && (
+                  <div style={{ marginTop: 6, padding: '5px 8px', background: 'var(--amber-bg)', borderRadius: 'var(--radius)', fontSize: 12, color: 'var(--amber-text)' }}>
+                    <i className="ti ti-alert-triangle" style={{ fontSize: 13, marginRight: 6 }} />Late submission
+                  </div>
+                )}
+                {claim.duplicateException && (
+                  <div style={{ marginTop: 6, padding: '5px 8px', background: 'var(--purple-bg)', borderRadius: 'var(--radius)', fontSize: 12, color: 'var(--purple-text)' }}>
+                    <i className="ti ti-shield-exclamation" style={{ fontSize: 13, marginRight: 6 }} />
+                    Duplicate exception: {claim.duplicateExceptionNote || '—'}
+                  </div>
+                )}
               </Section>
               <Section title="Purpose">
                 <div style={{ fontSize: 13, marginBottom: 6 }}>{claim.purpose || '—'}</div>
-                <Row2 a="Log sheet ref" av={claim.logsheet || '—'} b="Signed by" bv={claim.sigName ? `${claim.sigName} (${claim.sigRank})` : '—'} />
+                <Row2 a="Approved memo ref" av={claim.logsheet || '—'} b="Signed by" bv={claim.sigName ? `${claim.sigName} (${claim.sigRank})` : '—'} />
               </Section>
               {(claim.docs?.length > 0 || claim.docLinks?.length > 0) && (
                 <Section title="Supporting documents">
@@ -400,6 +433,34 @@ export default function ClaimModal({ claim, onClose }) {
                   <span style={{ fontFamily: 'var(--mono)', color: 'var(--green-text)' }}>R {nett.toFixed(2)}</span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {tab === 'files' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(claim.attachments || []).map(a => (
+                <a
+                  key={a.id}
+                  href={attachmentUrl(claim.ref, a.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    padding: '10px 14px', background: 'var(--blue-bg)',
+                    borderRadius: 'var(--radius)', textDecoration: 'none',
+                    color: 'var(--blue-text)',
+                  }}
+                >
+                  <i className="ti ti-file-download" style={{ fontSize: 18, flexShrink: 0 }} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 500 }}>{a.fileName}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 2 }}>
+                      {a.fieldKey} · {a.fileSize > 0 ? `${(a.fileSize / 1024).toFixed(0)} KB` : ''} · {(a.mimeType || '').split('/')[1] || ''}
+                    </div>
+                  </div>
+                  <i className="ti ti-external-link" style={{ fontSize: 14, opacity: 0.6 }} />
+                </a>
+              ))}
             </div>
           )}
 

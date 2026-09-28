@@ -23,16 +23,52 @@ async function apiFetch(path, options = {}) {
   }
 
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(data.error || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.data   = data;
+    throw err;
+  }
   return data;
 }
 
 export const api = {
-  getClaims:      ()                              => apiFetch('/api/claims'),
-  createClaim:    (claim)                         => apiFetch('/api/claims', { method: 'POST', body: JSON.stringify(claim) }),
-  updateStatus:   (ref, status, extra = {})       => apiFetch(`/api/claims/${ref}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) }),
-  requestInfo:    (ref, message)                  => apiFetch(`/api/claims/${ref}/request-info`, { method: 'POST', body: JSON.stringify({ message }) }),
-  respondInfo:    (ref, message, docLinks = [])   => apiFetch(`/api/claims/${ref}/respond-info`, { method: 'POST', body: JSON.stringify({ message, docLinks }) }),
-  getHistory:     (ref)                           => apiFetch(`/api/claims/${ref}/history`),
-  getAuditLog:    ()                              => apiFetch('/api/audit'),
+  getClaims:           ()                                      => apiFetch('/api/claims'),
+  createClaim:         (claim)                                 => apiFetch('/api/claims', { method: 'POST', body: JSON.stringify(claim) }),
+  updateStatus:        (ref, status, extra = {})               => apiFetch(`/api/claims/${ref}/status`, { method: 'PATCH', body: JSON.stringify({ status, ...extra }) }),
+  requestInfo:         (ref, message)                          => apiFetch(`/api/claims/${ref}/request-info`, { method: 'POST', body: JSON.stringify({ message }) }),
+  respondInfo:         (ref, message, docLinks = [], attachments = []) => apiFetch(`/api/claims/${ref}/respond-info`, { method: 'POST', body: JSON.stringify({ message, docLinks, attachments }) }),
+  getHistory:          (ref)                                   => apiFetch(`/api/claims/${ref}/history`),
+  getAuditLog:         ()                                      => apiFetch('/api/audit'),
+  // Tariff schedules
+  getTariffSchedules:  ()                                      => apiFetch('/api/tariff-schedules'),
+  createTariffSchedule: (data)                                 => apiFetch('/api/tariff-schedules', { method: 'POST', body: JSON.stringify(data) }),
+  deleteTariffSchedule: (id)                                   => apiFetch(`/api/tariff-schedules/${id}`, { method: 'DELETE' }),
 };
+
+// Convert a browser File to base64
+export async function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve(reader.result.split(',')[1]); // strip data: header
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// Build an attachment object ready to include in claim payload
+export async function buildAttachment(file, fieldKey) {
+  const fileData = await fileToBase64(file);
+  return {
+    fieldKey,
+    fileName: file.name,
+    fileData,
+    mimeType: file.type || 'application/octet-stream',
+    fileSize: file.size,
+  };
+}
+
+// Build a download URL for a stored attachment
+export function attachmentUrl(ref, attachmentId) {
+  return `/api/claims/${ref}/attachments/${attachmentId}`;
+}

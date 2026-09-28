@@ -18,7 +18,8 @@ const C = {
 };
 const STATUS_COLOR = {
   draft: C.gray, pending: C.amber, approved: C.green,
-  rejected: C.red, ecm: C.purple, routed: C.purple, paid: C.teal,
+  compiled: C.blue, verified: C.teal, hr_approved: C.green,
+  rejected: C.red, info_requested: C.purple, paid: C.teal,
 };
 const PIE_PALETTE = [C.blue, C.teal, C.green, C.amber, C.purple, C.red, C.gray];
 
@@ -108,24 +109,74 @@ function EmptyChart({ message }) {
 const ttStyle = { background: 'var(--surface)', border: '0.5px solid var(--border)', borderRadius: 8, fontSize: 12 };
 const fmtR = v => `R ${Number(v).toFixed(0)}`;
 
+// ── Date range filter ─────────────────────────────────────────────────────────
+
+const DATE_RANGES = [
+  { value: 'all',  label: 'All time' },
+  { value: '30d',  label: 'Last 30 days' },
+  { value: '3m',   label: 'Last 3 months' },
+  { value: '6m',   label: 'Last 6 months' },
+  { value: '12m',  label: 'Last 12 months' },
+  { value: 'fy',   label: 'Financial year (Apr–Mar)' },
+];
+
+function filterByRange(claims, range) {
+  if (range === 'all') return claims;
+  const now = new Date();
+  let from;
+  if (range === '30d')  from = new Date(now - 30 * 86400e3);
+  else if (range === '3m')  from = new Date(now.getFullYear(), now.getMonth() - 3, 1);
+  else if (range === '6m')  from = new Date(now.getFullYear(), now.getMonth() - 6, 1);
+  else if (range === '12m') from = new Date(now.getFullYear(), now.getMonth() - 12, 1);
+  else if (range === 'fy') {
+    const yr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    from = new Date(yr, 3, 1); // 1 April
+  }
+  return claims.filter(c => new Date(c.createdAt || 0) >= from);
+}
+
+function DateRangeFilter({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '1.25rem' }}>
+      <i className="ti ti-calendar-stats" style={{ fontSize: 14, color: 'var(--text3)' }} />
+      <span style={{ fontSize: 12, color: 'var(--text2)' }}>Period:</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{
+          padding: '3px 8px', borderRadius: 'var(--radius)',
+          border: '0.5px solid var(--border2)', fontSize: 12,
+          background: 'var(--surface)', color: 'var(--text)',
+        }}
+      >
+        {DATE_RANGES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+      </select>
+    </div>
+  );
+}
+
 // ── Workflow card ─────────────────────────────────────────────────────────────
 
 const WORKFLOW_STEPS = [
-  { role: 'Official',    action: 'Complete Persal claim form',    note: 'With all supporting documents' },
-  { role: 'Official',    action: 'Submit to supervisor',           note: 'For approval and signature' },
-  { role: 'Supervisor',  action: 'Approve claim',                  note: 'Verify dates, km, purpose, log sheet' },
-  { role: 'HRS Payroll', action: 'Quality check & Persal capture', note: 'Compile mandate and upload to ECM' },
-  { role: 'DMC Payroll', action: 'Pay on supplementary',           note: 'Verify payment confirmed on Persal' },
+  { role: 'Official',   action: 'Submit travel claim',              note: 'With vehicle, tariff & trip details' },
+  { role: 'Supervisor', action: 'Approve',                          note: 'Verify dates, km, purpose, approved memo' },
+  { role: 'Compiler',   action: 'Compile',                          note: 'Check allocation codes & Persal fields' },
+  { role: 'Verifier',   action: 'Verify',                           note: 'Independent completeness check' },
+  { role: 'HR Approver',action: 'HR Approve',                       note: 'Final approval before payment' },
+  { role: 'HRS',        action: 'Process & mark paid on Persal',    note: 'Capture & confirm payment' },
 ];
-const ROLE_STEPS = { official: [0,1], supervisor: [2], hrs: [3], ecm: [3], dmc: [4], admin: [] };
+const ROLE_STEPS = {
+  official: [0], supervisor: [1], compiler: [2],
+  verifier: [3], approver: [4], hrs: [5], admin: [],
+};
 
 function WorkflowCard({ role }) {
   const active = ROLE_STEPS[role] || [];
   return (
     <Card>
-      <CardTitle>Workflow — as-is process</CardTitle>
+      <CardTitle>6-stage workflow</CardTitle>
       {WORKFLOW_STEPS.map((s, i) => (
-        <div key={i} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: i < 4 ? '0.5px solid var(--border)' : 'none' }}>
+        <div key={i} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: i < WORKFLOW_STEPS.length - 1 ? '0.5px solid var(--border)' : 'none' }}>
           <div style={{
             width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -288,12 +339,62 @@ function SupervisorDashboard({ claims }) {
   );
 }
 
+// Shared queue dashboard for compiler / verifier / approver
+function HRChainDashboard({ claims, role }) {
+  const queueStatus = { compiler: 'approved', verifier: 'compiled', approver: 'verified' }[role];
+  const queue    = claims.filter(c => c.status === queueStatus);
+  const rejected = claims.filter(c => c.status === 'rejected');
+  const monthly  = getMonthlyData(claims);
+
+  return (
+    <>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: '1.5rem' }}>
+        <GradMetric label="In my queue"   value={queue.length}    sub={`Status: ${queueStatus}`}    color={C.blue}  />
+        <GradMetric label="Rejected"      value={rejected.length} sub="Returned to official"         color={C.red}   />
+        <GradMetric label="Paid"          value={claims.filter(c => c.status === 'paid').length} sub="Completed" color={C.teal} />
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+        {monthly.some(m => m.count > 0)
+          ? <ChartCard title="Monthly claim activity">
+              <BarChart data={monthly} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip contentStyle={ttStyle} />
+                <Bar dataKey="count" fill={C.blue} radius={[4,4,0,0]} name="Claims" />
+              </BarChart>
+            </ChartCard>
+          : <EmptyChart message="No claim data to chart yet" />}
+        <WorkflowCard role={role} />
+      </div>
+      <Card>
+        <CardTitle>Claims in my queue</CardTitle>
+        {queue.length === 0
+          ? <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
+              <i className="ti ti-inbox" style={{ fontSize: 28, display: 'block', marginBottom: 8 }} />
+              <p style={{ fontSize: 13 }}>Queue is empty.</p>
+            </div>
+          : <table><thead><tr><th>Ref</th><th>Official</th><th>Amount</th><th>Status</th></tr></thead>
+              <tbody>{queue.slice(0,8).map(c => (
+                <tr key={c.ref}>
+                  <td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{c.ref}</td>
+                  <td>{c.name}</td>
+                  <td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount||0).toFixed(2)}</td>
+                  <td><StatusBadge status={c.status} /></td>
+                </tr>
+              ))}</tbody>
+            </table>}
+      </Card>
+    </>
+  );
+}
+
 function HRSDashboard({ claims }) {
-  const toCapture = claims.filter(c => c.status === 'approved');
+  const toCapture = claims.filter(c => c.status === 'hr_approved');
   const infoReq   = claims.filter(c => c.status === 'info_requested');
   const monthly   = getMonthlyData(claims);
   const stages    = [
-    { name: 'Approved',      value: toCapture.length, fill: C.green },
+    { name: 'HR-Approved',   value: toCapture.length, fill: C.green },
     { name: 'Info requested', value: infoReq.length,  fill: C.purple },
     { name: 'Paid',          value: claims.filter(c => c.status === 'paid').length, fill: C.teal },
   ];
@@ -301,9 +402,9 @@ function HRSDashboard({ claims }) {
   return (
     <>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: '1.5rem' }}>
-        <GradMetric label="Ready to process" value={toCapture.length}                                   sub="Approved claims"   color={C.green} />
-        <GradMetric label="Info requested"   value={infoReq.length}                                     sub="Awaiting response" color={C.purple} />
-        <GradMetric label="Paid"             value={claims.filter(c => c.status === 'paid').length}      sub="Confirmed"        color={C.teal} />
+        <GradMetric label="Ready to process" value={toCapture.length}                                   sub="HR-approved claims" color={C.green} />
+        <GradMetric label="Info requested"   value={infoReq.length}                                     sub="Awaiting response"  color={C.purple} />
+        <GradMetric label="Paid"             value={claims.filter(c => c.status === 'paid').length}      sub="Confirmed"          color={C.teal} />
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
@@ -334,9 +435,9 @@ function HRSDashboard({ claims }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
         <Card>
-          <CardTitle>Ready for capture</CardTitle>
+          <CardTitle>Ready for payment</CardTitle>
           {toCapture.length === 0
-            ? <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}><i className="ti ti-database" style={{ fontSize: 28, display: 'block', marginBottom: 8 }} /><p style={{ fontSize: 13 }}>No approved claims.</p></div>
+            ? <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}><i className="ti ti-database" style={{ fontSize: 28, display: 'block', marginBottom: 8 }} /><p style={{ fontSize: 13 }}>No HR-approved claims.</p></div>
             : <table><thead><tr><th>Ref</th><th>Official</th><th>Amount</th><th>Status</th></tr></thead>
                 <tbody>{toCapture.slice(0,6).map(c => (
                   <tr key={c.ref}><td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{c.ref}</td><td>{c.name}</td><td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount||0).toFixed(2)}</td><td><StatusBadge status={c.status} /></td></tr>
@@ -486,13 +587,20 @@ function AdminDashboard({ claims }) {
 
 export default function Dashboard({ claims, onNav, user }) {
   const role = user?.role;
+  const [dateRange, setDateRange] = React.useState('all');
+  const filtered = filterByRange(claims, dateRange);
+
   return (
     <div>
       <WelcomeBanner user={user} />
-      {role === 'official'   && <OfficialDashboard   claims={claims} persal={user?.persal} onNav={onNav} />}
-      {role === 'supervisor' && <SupervisorDashboard claims={claims} />}
-      {role === 'hrs'        && <HRSDashboard        claims={claims} />}
-          {role === 'admin'      && <AdminDashboard      claims={claims} />}
+      <DateRangeFilter value={dateRange} onChange={setDateRange} />
+      {role === 'official'   && <OfficialDashboard   claims={filtered} persal={user?.persal} onNav={onNav} />}
+      {role === 'supervisor' && <SupervisorDashboard claims={filtered} />}
+      {role === 'compiler'   && <HRChainDashboard    claims={filtered} role="compiler" />}
+      {role === 'verifier'   && <HRChainDashboard    claims={filtered} role="verifier" />}
+      {role === 'approver'   && <HRChainDashboard    claims={filtered} role="approver" />}
+      {role === 'hrs'        && <HRSDashboard        claims={filtered} />}
+      {role === 'admin'      && <AdminDashboard      claims={filtered} />}
     </div>
   );
 }

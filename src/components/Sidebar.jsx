@@ -4,14 +4,15 @@ const ALL_NAV = [
   {
     section: 'Overview',
     items: [
-      { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard', roles: ['official', 'supervisor', 'hrs', 'admin'] },
+      { id: 'dashboard', icon: 'layout-dashboard', label: 'Dashboard',
+        roles: ['official','supervisor','compiler','verifier','approver','hrs','admin'] },
     ],
   },
   {
     section: 'My Claims',
     items: [
-      { id: 'new-claim', icon: 'plus',         label: 'New claim', roles: ['official'] },
-      { id: 'my-claims', icon: 'file-invoice', label: 'My claims', roles: ['official'], badge: 'my' },
+      { id: 'new-claim', icon: 'plus',         label: 'New claim',  roles: ['official'] },
+      { id: 'my-claims', icon: 'file-invoice', label: 'My claims',  roles: ['official'], badge: 'my' },
     ],
   },
   {
@@ -21,7 +22,15 @@ const ALL_NAV = [
     ],
   },
   {
-    section: 'Internal HR',
+    section: 'Internal HR Chain',
+    items: [
+      { id: 'compiler', icon: 'stack-2',       label: 'Compiler queue',   roles: ['compiler'],  badge: 'compiler' },
+      { id: 'verifier', icon: 'shield-check',  label: 'Verifier queue',   roles: ['verifier'],  badge: 'verifier' },
+      { id: 'approver', icon: 'circle-check',  label: 'HR Approver queue',roles: ['approver'],  badge: 'approver' },
+    ],
+  },
+  {
+    section: 'HRS',
     items: [
       { id: 'hrs', icon: 'checklist', label: 'Claims queue', roles: ['hrs'], badge: 'hrs' },
     ],
@@ -29,9 +38,9 @@ const ALL_NAV = [
   {
     section: 'Admin',
     items: [
-      { id: 'tariffs', icon: 'table',        label: 'Tariff table', roles: ['admin'] },
-      { id: 'reports', icon: 'chart-bar',    label: 'Reports',      roles: ['admin'] },
-      { id: 'audit',   icon: 'shield-check', label: 'Audit trail',  roles: ['admin'] },
+      { id: 'tariffs', icon: 'table',        label: 'Tariff schedules', roles: ['admin'] },
+      { id: 'reports', icon: 'chart-bar',    label: 'Reports',          roles: ['admin'] },
+      { id: 'audit',   icon: 'shield-check', label: 'Audit trail',      roles: ['admin'] },
     ],
   },
 ];
@@ -39,15 +48,21 @@ const ALL_NAV = [
 const ROLE_LABELS = {
   official:   'Official',
   supervisor: 'Supervisor',
-  hrs:        'Internal HR',
+  compiler:   'Compiler',
+  verifier:   'Verifier',
+  approver:   'HR Approver',
+  hrs:        'HRS',
   admin:      'System Admin',
 };
 
 const ROLE_COLORS = {
-  official:   { bg: 'var(--teal-bg)',   color: 'var(--teal-text)' },
-  supervisor: { bg: 'var(--amber-bg)',  color: 'var(--amber-text)' },
-  hrs:        { bg: 'var(--blue-bg)',   color: 'var(--blue-text)' },
-  admin:      { bg: 'var(--gray-bg)',   color: 'var(--gray-text)' },
+  official:   { bg: 'var(--teal-bg)',   color: 'var(--teal-text)'   },
+  supervisor: { bg: 'var(--amber-bg)',  color: 'var(--amber-text)'  },
+  compiler:   { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  verifier:   { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  approver:   { bg: 'var(--green-bg)',  color: 'var(--green-text)'  },
+  hrs:        { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  admin:      { bg: 'var(--gray-bg)',   color: 'var(--gray-text)'   },
 };
 
 export default function Sidebar({ active, onNav, badges, user, onLogout }) {

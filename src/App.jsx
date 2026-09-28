@@ -7,7 +7,10 @@ import Dashboard from './components/Dashboard';
 import NewClaim from './components/NewClaim';
 import MyClaims from './components/MyClaims';
 import SupervisorQueue from './components/SupervisorQueue';
-import InternalHRQueue from './components/HRSQueue';
+import CompilerQueue from './components/CompilerQueue';
+import VerifierQueue from './components/VerifierQueue';
+import ApproverQueue from './components/ApproverQueue';
+import HRSQueue from './components/HRSQueue';
 import Tariffs from './components/Tariffs';
 import Reports from './components/Reports';
 import AuditLog from './components/AuditLog';
@@ -18,6 +21,9 @@ import { api } from './utils/api';
 const ROLE_PAGES = {
   official:   ['dashboard', 'new-claim', 'my-claims'],
   supervisor: ['dashboard', 'supervisor'],
+  compiler:   ['dashboard', 'compiler'],
+  verifier:   ['dashboard', 'verifier'],
+  approver:   ['dashboard', 'approver'],
   hrs:        ['dashboard', 'hrs'],
   admin:      ['dashboard', 'tariffs', 'reports', 'audit'],
 };
@@ -54,10 +60,14 @@ function AppShell() {
     return updated;
   }
 
+  // Badge counts for sidebar
   const badges = {
-    my:  claims.filter(c => c.persal === user?.persal).length,
-    sup: claims.filter(c => c.status === 'pending').length,
-    hrs: claims.filter(c => c.status === 'approved').length,
+    my:       claims.filter(c => c.persal === user?.persal).length,
+    sup:      claims.filter(c => c.status === 'pending').length,
+    compiler: claims.filter(c => c.status === 'approved').length,
+    verifier: claims.filter(c => c.status === 'compiled').length,
+    approver: claims.filter(c => c.status === 'verified').length,
+    hrs:      claims.filter(c => c.status === 'hr_approved').length,
   };
 
   function renderPage() {
@@ -80,12 +90,10 @@ function AppShell() {
           <NewClaim
             user={user}
             onSubmit={async claim => {
-              try {
-                const created = await api.createClaim(claim);
-                setClaims(prev => [created, ...prev]);
-                onNav('my-claims');
-                toast(`Claim ${created.ref} submitted — your supervisor has been notified`);
-              } catch (err) { toast('Error: ' + err.message); }
+              const created = await api.createClaim(claim);
+              setClaims(prev => [created, ...prev]);
+              onNav('my-claims');
+              toast(`Claim ${created.ref} submitted — your supervisor has been notified`);
             }}
             onSaveDraft={async claim => {
               try {
@@ -104,11 +112,11 @@ function AppShell() {
             claims={claims.filter(c => c.persal === user?.persal)}
             onNav={onNav}
             onViewClaim={setSelectedClaim}
-            onRespondInfo={async (ref, message, docLinks) => {
+            onRespondInfo={async (ref, message, docLinks, attachments) => {
               try {
-                const updated = await api.respondInfo(ref, message, docLinks);
+                const updated = await api.respondInfo(ref, message, docLinks, attachments);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — response submitted. Internal HR has been notified.`);
+                toast(`${ref} — response submitted. HRS has been notified.`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             toast={toast}
@@ -123,12 +131,72 @@ function AppShell() {
             onApprove={async ref => {
               try {
                 await updateStatus(ref, 'approved');
-                toast(`${ref} approved — Internal HR notified`);
+                toast(`${ref} approved — Compiler notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onReject={async ref => {
+            onReject={async (ref, note) => {
               try {
-                await updateStatus(ref, 'rejected');
+                await updateStatus(ref, 'rejected', { note });
+                toast(`${ref} rejected — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+          />
+        );
+
+      case 'compiler':
+        return (
+          <CompilerQueue
+            claims={claims}
+            onViewClaim={setSelectedClaim}
+            onCompile={async ref => {
+              try {
+                await updateStatus(ref, 'compiled');
+                toast(`${ref} compiled — Verifier notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onReject={async (ref, note) => {
+              try {
+                await updateStatus(ref, 'rejected', { note });
+                toast(`${ref} rejected — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+          />
+        );
+
+      case 'verifier':
+        return (
+          <VerifierQueue
+            claims={claims}
+            onViewClaim={setSelectedClaim}
+            onVerify={async ref => {
+              try {
+                await updateStatus(ref, 'verified');
+                toast(`${ref} verified — HR Approver notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onReject={async (ref, note) => {
+              try {
+                await updateStatus(ref, 'rejected', { note });
+                toast(`${ref} rejected — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+          />
+        );
+
+      case 'approver':
+        return (
+          <ApproverQueue
+            claims={claims}
+            onViewClaim={setSelectedClaim}
+            onApprove={async ref => {
+              try {
+                await updateStatus(ref, 'hr_approved');
+                toast(`${ref} HR-approved — HRS notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onReject={async (ref, note) => {
+              try {
+                await updateStatus(ref, 'rejected', { note });
                 toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
@@ -137,13 +205,19 @@ function AppShell() {
 
       case 'hrs':
         return (
-          <InternalHRQueue
+          <HRSQueue
             claims={claims}
             onViewClaim={setSelectedClaim}
             onPay={async ref => {
               try {
                 await updateStatus(ref, 'paid');
                 toast(`${ref} marked as paid — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onReject={async (ref, note) => {
+              try {
+                await updateStatus(ref, 'rejected', { note });
+                toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onRequestInfo={async (ref, message) => {

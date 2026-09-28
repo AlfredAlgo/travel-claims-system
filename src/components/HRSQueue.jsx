@@ -1,8 +1,8 @@
 import React, { useState, useCallback } from 'react';
-import { Card, Btn, PersalTag, RoleBadge, StatusBadge } from './Shared';
+import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
-
-// ── Info request modal ────────────────────────────────────────────────────────
+import RejectModal from './RejectModal';
+import { attachmentUrl } from '../utils/api';
 
 function RequestInfoModal({ claim, onSubmit, onClose }) {
   const [message, setMessage] = useState('');
@@ -67,11 +67,7 @@ function RequestInfoModal({ claim, onSubmit, onClose }) {
 
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: '1rem' }}>
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn
-            variant="primary"
-            disabled={!message.trim() || busy}
-            onClick={handleSubmit}
-          >
+          <Btn variant="primary" disabled={!message.trim() || busy} onClick={handleSubmit}>
             <i className="ti ti-send" style={{ fontSize: 14 }} />
             {busy ? 'Sending…' : 'Send request'}
           </Btn>
@@ -81,28 +77,27 @@ function RequestInfoModal({ claim, onSubmit, onClose }) {
   );
 }
 
-// ── Main queue ────────────────────────────────────────────────────────────────
-
 const QC_CHECKS = [
   'Persal number confirmed', 'Dates & ref verified',
   'Persal codes correct', 'Total km verified',
-  'Tariff code (0469 / 0470)', 'Reason for travel stated', 'Vehicle capacity noted',
+  'Tariff category & rate verified', 'Reason for travel stated',
 ];
 
-export default function InternalHRQueue({ claims, onPay, onRequestInfo, onViewClaim }) {
-  const queue = claims.filter(c => c.status === 'approved');
+export default function HRSQueue({ claims, onPay, onRequestInfo, onReject, onViewClaim }) {
+  const queue = claims.filter(c => c.status === 'hr_approved');
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
-  const [infoModal, setInfoModal] = useState(null);
+  const [infoModal,   setInfoModal]   = useState(null);
+  const [rejectModal, setRejectModal] = useState(null);
 
   return (
     <div>
       <div style={{ marginBottom: '1.5rem' }}>
         <div style={{ fontSize: 20, fontWeight: 500, display: 'flex', alignItems: 'center', gap: 10 }}>
-          <RoleBadge role="HRS" /> Internal HR — Claims queue
+          <RoleBadge role="HRS" /> HRS — Claims queue
         </div>
         <div style={{ fontSize: 13, color: 'var(--text2)', marginTop: 6 }}>
-          Review approved claims → verify details → mark as paid or request additional information
+          Review HR-approved claims → verify details → mark as paid on Persal or request additional information
         </div>
       </div>
 
@@ -127,30 +122,43 @@ export default function InternalHRQueue({ claims, onPay, onRequestInfo, onViewCl
           <thead>
             <tr>
               <th>Ref</th><th>Official</th><th>Persal #</th>
-              <th>Persal code</th><th>KM</th><th>Amount</th><th>Documents</th><th>Actions</th>
+              <th>Category</th><th>KM</th><th>Amount</th><th>Documents</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 ? (
               <tr>
                 <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
-                  {queue.length === 0 ? 'No approved claims in queue' : 'No records match the current filters.'}
+                  {queue.length === 0 ? 'No HR-approved claims in queue' : 'No records match the current filters.'}
                 </td>
               </tr>
             ) : filtered.map(c => (
               <tr key={c.ref}>
-                <td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{c.ref}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+                  {c.ref}
+                  {c.isLateSubmission && (
+                    <span style={{ marginLeft: 4, fontSize: 9, background: 'var(--amber-bg)', color: 'var(--amber-text)', padding: '1px 4px', borderRadius: 3 }}>
+                      Late
+                    </span>
+                  )}
+                </td>
                 <td>
                   <div style={{ fontWeight: 500 }}>{c.name}</div>
                   <div style={{ fontSize: 11, color: 'var(--text3)' }}>{(c.dept || '').replace('GPG — ', '')}</div>
                 </td>
                 <td><PersalTag code={c.persal} /></td>
-                <td><PersalTag code={c.kmBracket === 'more' ? '04069' : '04070'} /></td>
+                <td>
+                  {c.vehicleCategory
+                    ? <span style={{ fontFamily: 'var(--mono)', fontSize: 11, background: 'var(--blue-bg)', color: 'var(--blue-text)', padding: '2px 6px', borderRadius: 4 }}>Cat {c.vehicleCategory}</span>
+                    : c.kmBracket === 'more'
+                      ? <PersalTag code="04069" />
+                      : <PersalTag code="04070" />}
+                </td>
                 <td>{c.km} km</td>
-                <td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount || 0).toFixed(2)}</td>
+                <td style={{ fontFamily: 'var(--mono)', fontWeight: 500 }}>R {(c.amount || 0).toFixed(2)}</td>
                 <td>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                    {(c.docs || []).length === 0 && (c.docLinks || []).length === 0 && (
+                    {(c.docs || []).length === 0 && (c.attachments || []).length === 0 && (
                       <span style={{ fontSize: 11, color: 'var(--red-text)' }}>None attached</span>
                     )}
                     {(c.docs || []).map(d => (
@@ -158,13 +166,15 @@ export default function InternalHRQueue({ claims, onPay, onRequestInfo, onViewCl
                         <i className="ti ti-paperclip" style={{ fontSize: 10, marginRight: 3 }} />{d}
                       </span>
                     ))}
-                    {(c.docLinks || []).map((dl, i) => (
-                      <a key={i} href={dl.url} target="_blank" rel="noopener noreferrer" style={{
-                        fontSize: 11, color: 'var(--blue-text)', textDecoration: 'none',
-                        display: 'flex', alignItems: 'center', gap: 3,
-                      }}>
+                    {(c.attachments || []).map(a => (
+                      <a
+                        key={a.id}
+                        href={attachmentUrl(c.ref, a.id)}
+                        target="_blank" rel="noopener noreferrer"
+                        style={{ fontSize: 11, color: 'var(--blue-text)', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 3 }}
+                      >
                         <i className="ti ti-download" style={{ fontSize: 11 }} />
-                        {dl.name || 'Document'}
+                        {a.fileName}
                       </a>
                     ))}
                   </div>
@@ -181,6 +191,9 @@ export default function InternalHRQueue({ claims, onPay, onRequestInfo, onViewCl
                       style={{ borderColor: 'var(--purple-text)', color: 'var(--purple-text)' }}>
                       <i className="ti ti-help" style={{ fontSize: 13 }} /> Request info
                     </Btn>
+                    <Btn variant="danger" size="sm" onClick={() => setRejectModal(c)}>
+                      <i className="ti ti-x" style={{ fontSize: 13 }} /> Reject
+                    </Btn>
                   </div>
                 </td>
               </tr>
@@ -190,11 +203,10 @@ export default function InternalHRQueue({ claims, onPay, onRequestInfo, onViewCl
       </Card>
 
       {infoModal && (
-        <RequestInfoModal
-          claim={infoModal}
-          onSubmit={onRequestInfo}
-          onClose={() => setInfoModal(null)}
-        />
+        <RequestInfoModal claim={infoModal} onSubmit={onRequestInfo} onClose={() => setInfoModal(null)} />
+      )}
+      {rejectModal && (
+        <RejectModal claim={rejectModal} onConfirm={onReject} onClose={() => setRejectModal(null)} />
       )}
     </div>
   );
