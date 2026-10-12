@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
 import RejectModal from './RejectModal';
+import SLABadge from './SLABadge';
 
 const QC_ITEMS = [
   'Compilation accuracy checked', 'Allocation codes match Persal function 5.3.11',
@@ -47,13 +48,13 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim 
           <thead>
             <tr>
               <th>Ref</th><th>Official</th><th>Persal #</th><th>Business unit</th>
-              <th>Category</th><th>KM</th><th>Amount</th><th>Flags</th><th>Actions</th>
+              <th>Category</th><th>KM</th><th>Amount</th><th>Flags</th><th>SLA</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
+                <td colSpan={10} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
                   {queue.length === 0 ? 'No compiled claims to verify' : 'No records match the current filters.'}
                 </td>
               </tr>
@@ -73,17 +74,14 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim 
                 <td>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                     {c.isLateSubmission && (
-                      <span style={{ fontSize: 10, background: 'var(--amber-bg)', color: 'var(--amber-text)', padding: '1px 5px', borderRadius: 4 }}>
-                        Late
-                      </span>
+                      <span style={{ fontSize: 10, background: 'var(--amber-bg)', color: 'var(--amber-text)', padding: '1px 5px', borderRadius: 4 }}>Late</span>
                     )}
                     {c.duplicateException && (
-                      <span style={{ fontSize: 10, background: 'var(--purple-bg)', color: 'var(--purple-text)', padding: '1px 5px', borderRadius: 4 }}>
-                        Dup exception
-                      </span>
+                      <span style={{ fontSize: 10, background: 'var(--purple-bg)', color: 'var(--purple-text)', padding: '1px 5px', borderRadius: 4 }}>Dup exception</span>
                     )}
                   </div>
                 </td>
+                <td><SLABadge claim={c} /></td>
                 <td>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>

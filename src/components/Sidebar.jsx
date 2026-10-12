@@ -38,9 +38,17 @@ const ALL_NAV = [
   {
     section: 'Admin',
     items: [
-      { id: 'tariffs', icon: 'table',        label: 'Tariff schedules', roles: ['admin'] },
-      { id: 'reports', icon: 'chart-bar',    label: 'Reports',          roles: ['admin'] },
-      { id: 'audit',   icon: 'shield-check', label: 'Audit trail',      roles: ['admin'] },
+      { id: 'tariffs',     icon: 'table',        label: 'Tariff schedules', roles: ['admin'] },
+      { id: 'reports',     icon: 'chart-bar',    label: 'Reports',          roles: ['admin'] },
+      { id: 'audit',       icon: 'shield-check', label: 'Audit trail',      roles: ['admin'] },
+      { id: 'sla-targets', icon: 'clock-edit',   label: 'SLA targets',      roles: ['admin'] },
+    ],
+  },
+  {
+    section: 'Settings',
+    items: [
+      { id: 'delegations', icon: 'users-group', label: 'Delegation of authority',
+        roles: ['supervisor','compiler','verifier','approver','hrs'] },
     ],
   },
 ];

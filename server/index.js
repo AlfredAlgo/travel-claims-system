@@ -53,6 +53,8 @@ const DB_CAPS = {
   tariffRate:      false,
   attachments:     false,
   tariffSchedules: false,
+  delegations:     false,
+  slaTargets:      false,
 };
 
 async function detectDbCapabilities() {
@@ -64,10 +66,26 @@ async function detectDbCapabilities() {
     supabase.from('claims').select('tariff_rate').limit(0),
     supabase.from('claim_attachments').select('id').limit(0),
     supabase.from('tariff_schedules').select('id').limit(0),
+    supabase.from('delegations').select('id').limit(0),
+    supabase.from('sla_targets').select('status').limit(0),
   ]);
-  const keys = ['userEmail','infoMessage','docLinks','vehicleCategory','tariffRate','attachments','tariffSchedules'];
+  const keys = ['userEmail','infoMessage','docLinks','vehicleCategory','tariffRate','attachments','tariffSchedules','delegations','slaTargets'];
   checks.forEach((r, i) => { DB_CAPS[keys[i]] = !r.error; });
   console.log('DB capabilities:', DB_CAPS);
+}
+
+// Returns the delegated roles for a user (roles they are acting on behalf of today)
+async function getActiveDelegatedRoles(userId) {
+  if (!DB_CAPS.delegations) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const { data } = await supabase
+    .from('delegations')
+    .select('role')
+    .eq('delegate_id', userId)
+    .eq('active', true)
+    .lte('start_date', today)
+    .gte('end_date', today);
+  return (data || []).map(d => d.role);
 }
 
 async function getEmailsByRole(...roles) {
@@ -440,8 +458,16 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   const rule = TRANSITION_RULES[status];
   if (!rule) return res.status(400).json({ error: 'Unknown status' });
+
+  let effectiveRole = user.role;
   if (!rule.roles.includes(user.role)) {
-    return res.status(403).json({ error: 'Forbidden: your role cannot set this status' });
+    // Check if user has an active delegation covering a required role
+    const delegatedRoles = await getActiveDelegatedRoles(user.id);
+    const matchedRole = rule.roles.find(r => delegatedRoles.includes(r));
+    if (!matchedRole) {
+      return res.status(403).json({ error: 'Forbidden: your role cannot set this status' });
+    }
+    effectiveRole = matchedRole;
   }
 
   const userSel = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
@@ -456,7 +482,14 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   // Validate from-status
   if (status === 'rejected') {
-    const allowed = REJECTION_FROM[user.role] || [];
+    let allowed = REJECTION_FROM[effectiveRole] || [];
+    if (!allowed.includes(existing.status)) {
+      // Also check any additional delegated roles
+      const delegatedRoles = await getActiveDelegatedRoles(user.id);
+      for (const dr of delegatedRoles) {
+        allowed = [...allowed, ...(REJECTION_FROM[dr] || [])];
+      }
+    }
     if (!allowed.includes(existing.status)) {
       return res.status(403).json({ error: `Your role cannot reject a claim in '${existing.status}' status` });
     }
@@ -766,6 +799,144 @@ app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
 
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+// ── SLA targets ───────────────────────────────────────────────────────────────
+
+app.get('/api/sla-targets', requireAuth, async (req, res) => {
+  if (!DB_CAPS.slaTargets) {
+    // Return hardcoded defaults if table not available
+    return res.json([
+      { status: 'pending',     working_days: 5, label: 'Supervisor approval' },
+      { status: 'approved',    working_days: 3, label: 'Compiler processing' },
+      { status: 'compiled',    working_days: 2, label: 'Verifier check' },
+      { status: 'verified',    working_days: 2, label: 'HR Approver sign-off' },
+      { status: 'hr_approved', working_days: 5, label: 'HRS payment processing' },
+    ]);
+  }
+  const { data, error } = await supabase.from('sla_targets').select('*');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+  if (!DB_CAPS.slaTargets) return res.status(503).json({ error: 'SLA targets not available' });
+  const { working_days } = req.body;
+  if (!working_days || working_days < 1) return res.status(400).json({ error: 'working_days must be >= 1' });
+  const { data, error } = await supabase
+    .from('sla_targets')
+    .update({ working_days })
+    .eq('status', req.params.status)
+    .select().single();
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// ── Delegations ───────────────────────────────────────────────────────────────
+
+app.get('/api/delegations', requireAuth, async (req, res) => {
+  if (!DB_CAPS.delegations) return res.json([]);
+  const { id } = req.user;
+  const { data, error } = await supabase
+    .from('delegations')
+    .select(`
+      id, role, start_date, end_date, reason, active, created_at,
+      delegator:delegator_id(id, name, persal, role),
+      delegate:delegate_id(id, name, persal, role)
+    `)
+    .or(`delegator_id.eq.${id},delegate_id.eq.${id}`)
+    .order('created_at', { ascending: false });
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.post('/api/delegations', requireAuth, async (req, res) => {
+  if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
+  const { delegateId, role, startDate, endDate, reason } = req.body;
+  const { user } = req;
+
+  if (!delegateId || !role || !startDate || !endDate) {
+    return res.status(400).json({ error: 'delegateId, role, startDate, endDate are required' });
+  }
+  // Can only delegate your own role
+  if (role !== user.role) {
+    return res.status(403).json({ error: 'You can only delegate your own role' });
+  }
+  if (delegateId === user.id) {
+    return res.status(400).json({ error: 'Cannot delegate to yourself' });
+  }
+  if (endDate < startDate) {
+    return res.status(400).json({ error: 'End date must be on or after start date' });
+  }
+
+  const { data, error } = await supabase
+    .from('delegations')
+    .insert({
+      delegator_id: user.id,
+      delegate_id:  delegateId,
+      role,
+      start_date:   startDate,
+      end_date:     endDate,
+      reason:       reason || '',
+      active:       true,
+    })
+    .select(`
+      id, role, start_date, end_date, reason, active, created_at,
+      delegator:delegator_id(id, name, persal, role),
+      delegate:delegate_id(id, name, persal, role)
+    `)
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Notify the delegate
+  if (DB_CAPS.userEmail) {
+    const { data: delegateUser } = await supabase.from('users').select('email').eq('id', delegateId).single();
+    if (delegateUser?.email) {
+      sendEmail({
+        to: delegateUser.email,
+        subject: `[GPG Claims] Delegation of authority — ${role}`,
+        html: emailTemplate('You have been delegated approval authority',
+          `<p><strong>${user.name}</strong> has delegated their <strong>${role}</strong> approval authority to you.</p>
+           <table style="width:100%;font-size:14px;border-collapse:collapse">
+             <tr><td style="padding:5px 0;color:#666;width:120px">Role delegated</td><td style="padding:5px 0;font-weight:bold">${role}</td></tr>
+             <tr><td style="padding:5px 0;color:#666">From</td><td style="padding:5px 0">${startDate}</td></tr>
+             <tr><td style="padding:5px 0;color:#666">To</td><td style="padding:5px 0">${endDate}</td></tr>
+             ${reason ? `<tr><td style="padding:5px 0;color:#666">Reason</td><td style="padding:5px 0">${reason}</td></tr>` : ''}
+           </table>
+           <p style="margin-top:16px">Log in to the GPG Travel Claims system to act on claims in this capacity.</p>`),
+      });
+    }
+  }
+
+  res.status(201).json(data);
+});
+
+app.delete('/api/delegations/:id', requireAuth, async (req, res) => {
+  if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
+  // Deactivate (not hard delete) — only the delegator can revoke
+  const { data: existing } = await supabase
+    .from('delegations').select('delegator_id').eq('id', req.params.id).single();
+  if (!existing) return res.status(404).json({ error: 'Delegation not found' });
+  if (existing.delegator_id !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only the delegator can revoke a delegation' });
+  }
+  const { error } = await supabase
+    .from('delegations').update({ active: false }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+});
+
+app.get('/api/users', requireAuth, async (req, res) => {
+  // Returns users that can receive a delegation (same or adjacent roles, excluding self)
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, name, persal, role, dept')
+    .neq('id', req.user.id)
+    .order('name');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data || []);
 });
 
 // ── Audit log (admin only) ────────────────────────────────────────────────────

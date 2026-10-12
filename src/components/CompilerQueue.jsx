@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Card, Btn, PersalTag, RoleBadge, StatusBadge } from './Shared';
 import SearchFilter from './SearchFilter';
 import RejectModal from './RejectModal';
+import SLABadge from './SLABadge';
 
 const QC_ITEMS = [
   'Supervisor signature present', 'Persal number confirmed', 'Vehicle category & tariff match circular',
@@ -46,13 +47,13 @@ export default function CompilerQueue({ claims, onCompile, onReject, onViewClaim
           <thead>
             <tr>
               <th>Ref</th><th>Official</th><th>Persal #</th><th>Business unit</th>
-              <th>Category</th><th>Tariff</th><th>KM</th><th>Amount</th><th>Actions</th>
+              <th>Category</th><th>Tariff</th><th>KM</th><th>Amount</th><th>SLA</th><th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
+                <td colSpan={10} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text3)' }}>
                   {queue.length === 0 ? 'No approved claims to compile' : 'No records match the current filters.'}
                 </td>
               </tr>
@@ -72,6 +73,7 @@ export default function CompilerQueue({ claims, onCompile, onReject, onViewClaim
                 </td>
                 <td>{c.km} km</td>
                 <td style={{ fontFamily: 'var(--mono)' }}>R {(c.amount || 0).toFixed(2)}</td>
+                <td><SLABadge claim={c} /></td>
                 <td>
                   <div style={{ display: 'flex', gap: 4 }}>
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>

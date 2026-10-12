@@ -44,6 +44,14 @@ export const api = {
   getTariffSchedules:  ()                                      => apiFetch('/api/tariff-schedules'),
   createTariffSchedule: (data)                                 => apiFetch('/api/tariff-schedules', { method: 'POST', body: JSON.stringify(data) }),
   deleteTariffSchedule: (id)                                   => apiFetch(`/api/tariff-schedules/${id}`, { method: 'DELETE' }),
+  // SLA
+  getSLATargets:       ()                                      => apiFetch('/api/sla-targets'),
+  updateSLATarget:     (status, days)                          => apiFetch(`/api/sla-targets/${status}`, { method: 'PATCH', body: JSON.stringify({ working_days: days }) }),
+  // Delegations
+  getDelegations:      ()                                      => apiFetch('/api/delegations'),
+  createDelegation:    (data)                                  => apiFetch('/api/delegations', { method: 'POST', body: JSON.stringify(data) }),
+  revokeDelegation:    (id)                                    => apiFetch(`/api/delegations/${id}`, { method: 'DELETE' }),
+  getUsers:            ()                                      => apiFetch('/api/users'),
 };
 
 // Convert a browser File to base64

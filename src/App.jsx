@@ -15,17 +15,19 @@ import Tariffs from './components/Tariffs';
 import Reports from './components/Reports';
 import AuditLog from './components/AuditLog';
 import ClaimModal from './components/ClaimModal';
+import DelegationManager from './components/DelegationManager';
+import SLATargets from './components/SLATargets';
 import { Toast } from './components/Shared';
 import { api } from './utils/api';
 
 const ROLE_PAGES = {
   official:   ['dashboard', 'new-claim', 'my-claims'],
-  supervisor: ['dashboard', 'supervisor'],
-  compiler:   ['dashboard', 'compiler'],
-  verifier:   ['dashboard', 'verifier'],
-  approver:   ['dashboard', 'approver'],
-  hrs:        ['dashboard', 'hrs'],
-  admin:      ['dashboard', 'tariffs', 'reports', 'audit'],
+  supervisor: ['dashboard', 'supervisor', 'delegations'],
+  compiler:   ['dashboard', 'compiler',  'delegations'],
+  verifier:   ['dashboard', 'verifier',  'delegations'],
+  approver:   ['dashboard', 'approver',  'delegations'],
+  hrs:        ['dashboard', 'hrs',       'delegations'],
+  admin:      ['dashboard', 'tariffs', 'reports', 'audit', 'sla-targets'],
 };
 
 function AppShell() {
@@ -230,6 +232,12 @@ function AppShell() {
             }}
           />
         );
+
+      case 'delegations':
+        return <DelegationManager user={user} toast={toast} />;
+
+      case 'sla-targets':
+        return <SLATargets toast={toast} />;
 
       case 'tariffs':
         return <Tariffs />;
