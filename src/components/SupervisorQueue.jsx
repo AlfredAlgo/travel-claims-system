@@ -1,6 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
+import FeedbackRequestModal from './FeedbackRequestModal';
 
 const QC_ITEMS = [
   'Correspondence of dates', 'Destination verified', 'KM vs approved memo',
@@ -85,11 +86,20 @@ function RejectModal({ claim, onConfirm, onClose }) {
   );
 }
 
-export default function SupervisorQueue({ claims, onApprove, onReject, onViewClaim }) {
+export default function SupervisorQueue({ claims, onApprove, onReject, onViewClaim, onRequestFeedback }) {
   const pending = claims.filter(c => c.status === 'pending');
   const [filtered, setFiltered] = useState(pending);
   const handleFilter = useCallback(r => setFiltered(r), []);
-  const [rejectModal, setRejectModal] = useState(null);
+  const [rejectModal,   setRejectModal]   = useState(null);
+  const [feedbackModal, setFeedbackModal] = useState(null);
+  const [checks, setChecks] = useState({});
+  const allChecked = QC_ITEMS.every(item => checks[item]);
+  const doneCount  = QC_ITEMS.filter(item => checks[item]).length;
+
+  async function handleApprove(ref) {
+    await onApprove(ref);
+    setChecks({});
+  }
 
   return (
     <div>
@@ -103,15 +113,28 @@ export default function SupervisorQueue({ claims, onApprove, onReject, onViewCla
       </div>
 
       <Card style={{ marginBottom: '1rem', background: 'var(--amber-bg)', border: '0.5px solid var(--amber-text)' }}>
-        <div style={{ fontSize: 12, color: 'var(--amber-text)', fontWeight: 500, marginBottom: 6 }}>
-          <i className="ti ti-clipboard-list" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
-          Checks &amp; balances — verify before approving:
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--amber-text)', fontWeight: 500 }}>
+            <i className="ti ti-clipboard-list" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
+            Checks &amp; balances — tick each before approving:
+          </div>
+          <span style={{ fontSize: 11, color: allChecked ? 'var(--green-text)' : 'var(--amber-text)', fontWeight: 500 }}>
+            {doneCount}/{QC_ITEMS.length} {allChecked ? '✓ All clear' : 'completed'}
+          </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
           {QC_ITEMS.map(item => (
-            <span key={item} style={{ fontSize: 12, color: 'var(--amber-text)' }}>
-              <i className="ti ti-check" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />{item}
-            </span>
+            <div key={item}
+              onClick={() => setChecks(prev => ({ ...prev, [item]: !prev[item] }))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                fontSize: 12, color: checks[item] ? 'var(--green-text)' : 'var(--amber-text)',
+                userSelect: 'none', padding: '2px 0',
+              }}
+            >
+              <i className={`ti ti-${checks[item] ? 'square-check' : 'square'}`} style={{ fontSize: 14 }} />
+              {item}
+            </div>
           ))}
         </div>
       </Card>
@@ -152,8 +175,14 @@ export default function SupervisorQueue({ claims, onApprove, onReject, onViewCla
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>
                       <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
                     </Btn>
-                    <Btn variant="success" size="sm" onClick={() => onApprove(c.ref)}>
+                    <Btn variant="success" size="sm" disabled={!allChecked}
+                      title={allChecked ? '' : 'Tick all QC checks above before approving'}
+                      onClick={() => handleApprove(c.ref)}>
                       <i className="ti ti-check" style={{ fontSize: 13 }} /> Approve
+                    </Btn>
+                    <Btn size="sm" onClick={() => setFeedbackModal(c)}
+                      style={{ borderColor: 'var(--purple-text)', color: 'var(--purple-text)' }}>
+                      <i className="ti ti-message-exclamation" style={{ fontSize: 13 }} /> Request changes
                     </Btn>
                     <Btn variant="danger" size="sm" onClick={() => setRejectModal(c)}>
                       <i className="ti ti-x" style={{ fontSize: 13 }} /> Reject
@@ -167,10 +196,14 @@ export default function SupervisorQueue({ claims, onApprove, onReject, onViewCla
       </Card>
 
       {rejectModal && (
-        <RejectModal
-          claim={rejectModal}
-          onConfirm={onReject}
-          onClose={() => setRejectModal(null)}
+        <RejectModal claim={rejectModal} onConfirm={onReject} onClose={() => setRejectModal(null)} />
+      )}
+      {feedbackModal && (
+        <FeedbackRequestModal
+          claim={feedbackModal}
+          recipientLabel="Official (claimant)"
+          onSubmit={onRequestFeedback}
+          onClose={() => setFeedbackModal(null)}
         />
       )}
     </div>

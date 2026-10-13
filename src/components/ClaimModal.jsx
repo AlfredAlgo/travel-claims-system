@@ -15,9 +15,9 @@ function pdfHeader(doc, claim) {
   doc.setFillColor(...BLUE);
   doc.rect(0, 0, 210, 24, 'F');
   doc.setTextColor(...WHITE);
-  doc.setFontSize(13); doc.setFont(undefined, 'bold');
+  doc.setFontSize(13); doc.setFont('helvetica', 'bold');
   doc.text('GAUTENG PROVINCIAL GOVERNMENT', 105, 8, { align: 'center' });
-  doc.setFontSize(9.5); doc.setFont(undefined, 'normal');
+  doc.setFontSize(9.5); doc.setFont('helvetica', 'normal');
   doc.text('TRAVEL & SUBSISTENCE CLAIM  —  Z 584', 105, 14.5, { align: 'center' });
   doc.setFontSize(7.5);
   doc.text(`Ref: ${claim.ref}   ·   Status: ${STATUS_META[claim.status]?.label || claim.status}   ·   Submitted: ${(claim.createdAt || '').slice(0, 10)}`, 105, 21, { align: 'center' });
@@ -27,10 +27,10 @@ function pdfHeader(doc, claim) {
 function sectionLabel(doc, y, text) {
   doc.setFillColor(...BLUE_LIGHT);
   doc.rect(14, y - 4, 182, 5.5, 'F');
-  doc.setFontSize(7.5); doc.setFont(undefined, 'bold');
+  doc.setFontSize(7.5); doc.setFont('helvetica', 'bold');
   doc.setTextColor(...BLUE);
   doc.text(text, 16, y);
-  doc.setTextColor(...BLACK); doc.setFont(undefined, 'normal');
+  doc.setTextColor(...BLACK); doc.setFont('helvetica', 'normal');
   return y + 3;
 }
 
@@ -38,9 +38,9 @@ function signBlock(doc, x, y, w, role) {
   doc.setFillColor(248, 250, 252);
   doc.rect(x, y, w, 28, 'F');
   doc.setDrawColor(200, 210, 220); doc.rect(x, y, w, 28, 'S');
-  doc.setFontSize(7.5); doc.setFont(undefined, 'bold');
+  doc.setFontSize(7.5); doc.setFont('helvetica', 'bold');
   doc.setTextColor(...BLUE); doc.text(role, x + 2, y + 5);
-  doc.setTextColor(100); doc.setFont(undefined, 'normal'); doc.setFontSize(7);
+  doc.setTextColor(100); doc.setFont('helvetica', 'normal'); doc.setFontSize(7);
   doc.text('Signature:', x + 2, y + 13);
   doc.setDrawColor(160); doc.line(x + 20, y + 13, x + w - 3, y + 13);
   doc.text('Name:', x + 2, y + 19);
@@ -137,9 +137,9 @@ async function downloadPDF(claim, history) {
   if (y > 230) { doc.addPage(); pdfHeader(doc, claim); y = 30; }
   sectionLabel(doc, y, 'D — CERTIFICATION AND AUTHORISATION');
   y += 4;
-  doc.setFontSize(7.5); doc.setFont(undefined, 'italic'); doc.setTextColor(80);
+  doc.setFontSize(7.5); doc.setFont('helvetica', 'italic'); doc.setTextColor(80);
   doc.text('I certify that I was actually and necessarily employed travelling on public service during the period stated above, and that the charges are correct and in accordance with the authorised tariff.', 14, y, { maxWidth: 182 });
-  doc.setFont(undefined, 'normal'); doc.setTextColor(...BLACK);
+  doc.setFont('helvetica', 'normal'); doc.setTextColor(...BLACK);
   y += 8;
   const bw = 57;
   signBlock(doc, 14,        y, bw, 'OFFICIAL (Claimant)');
@@ -453,8 +453,9 @@ export default function ClaimModal({ claim, onClose }) {
             disabled={pdfLoading}
             onClick={async () => {
               setPdfLoading(true);
-              await downloadPDF(claim, history).catch(() => {});
-              setPdfLoading(false);
+              try { await downloadPDF(claim, history); }
+              catch (err) { alert('PDF failed: ' + err.message); }
+              finally { setPdfLoading(false); }
             }}
           >
             <i className="ti ti-file-type-pdf" style={{ fontSize: 14 }} />
@@ -465,8 +466,9 @@ export default function ClaimModal({ claim, onClose }) {
             disabled={xlsxLoading}
             onClick={async () => {
               setXlsxLoading(true);
-              await downloadExcel(claim).catch(() => {});
-              setXlsxLoading(false);
+              try { await downloadExcel(claim); }
+              catch (err) { alert('Excel failed: ' + err.message); }
+              finally { setXlsxLoading(false); }
             }}
           >
             <i className="ti ti-file-type-xls" style={{ fontSize: 14 }} />
@@ -641,16 +643,32 @@ export default function ClaimModal({ claim, onClose }) {
           {tab === 'files' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {(claim.attachments || []).map(a => (
-                <a
+                <button
                   key={a.id}
-                  href={attachmentUrl(claim.ref, a.id)}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  onClick={async () => {
+                    try {
+                      const token = localStorage.getItem('gpg_token');
+                      const res = await fetch(attachmentUrl(claim.ref, a.id), {
+                        headers: { Authorization: `Bearer ${token}` },
+                      });
+                      if (!res.ok) throw new Error('Download failed');
+                      const blob = await res.blob();
+                      const url = URL.createObjectURL(blob);
+                      const link = document.createElement('a');
+                      link.href = url;
+                      link.download = a.fileName;
+                      link.click();
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      alert('Could not download file: ' + err.message);
+                    }
+                  }}
                   style={{
                     display: 'flex', alignItems: 'center', gap: 10,
                     padding: '10px 14px', background: 'var(--blue-bg)',
-                    borderRadius: 'var(--radius)', textDecoration: 'none',
-                    color: 'var(--blue-text)',
+                    borderRadius: 'var(--radius)', border: 'none', cursor: 'pointer',
+                    color: 'var(--blue-text)', textAlign: 'left', width: '100%',
+                    fontFamily: 'var(--sans)',
                   }}
                 >
                   <i className="ti ti-file-download" style={{ fontSize: 18, flexShrink: 0 }} />
@@ -660,8 +678,8 @@ export default function ClaimModal({ claim, onClose }) {
                       {a.fieldKey} · {a.fileSize > 0 ? `${(a.fileSize / 1024).toFixed(0)} KB` : ''} · {(a.mimeType || '').split('/')[1] || ''}
                     </div>
                   </div>
-                  <i className="ti ti-external-link" style={{ fontSize: 14, opacity: 0.6 }} />
-                </a>
+                  <i className="ti ti-download" style={{ fontSize: 14, opacity: 0.6 }} />
+                </button>
               ))}
             </div>
           )}

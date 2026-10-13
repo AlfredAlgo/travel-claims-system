@@ -3,6 +3,7 @@ import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
 import RejectModal from './RejectModal';
 import SLABadge from './SLABadge';
+import FeedbackRequestModal from './FeedbackRequestModal';
 
 const QC_ITEMS = [
   'Claim verified by Verifier', 'Amount within policy limits',
@@ -10,11 +11,20 @@ const QC_ITEMS = [
   'Budget code / cost centre available',
 ];
 
-export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim }) {
+export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim, onRequestFeedback }) {
   const queue = claims.filter(c => c.status === 'verified');
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
-  const [rejectModal, setRejectModal] = useState(null);
+  const [rejectModal,   setRejectModal]   = useState(null);
+  const [feedbackModal, setFeedbackModal] = useState(null);
+  const [checks, setChecks] = useState({});
+  const allChecked = QC_ITEMS.every(item => checks[item]);
+  const doneCount  = QC_ITEMS.filter(item => checks[item]).length;
+
+  async function handleApprove(ref) {
+    await onApprove(ref);
+    setChecks({});
+  }
 
   return (
     <div>
@@ -28,15 +38,28 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
       </div>
 
       <Card style={{ marginBottom: '1rem', background: 'var(--green-bg)', border: '0.5px solid var(--green)' }}>
-        <div style={{ fontSize: 12, color: 'var(--green-text)', fontWeight: 500, marginBottom: 6 }}>
-          <i className="ti ti-circle-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
-          Final approval checks:
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--green-text)', fontWeight: 500 }}>
+            <i className="ti ti-circle-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
+            Final approval checks — tick each before approving:
+          </div>
+          <span style={{ fontSize: 11, color: allChecked ? 'var(--green-text)' : 'var(--text2)', fontWeight: 500 }}>
+            {doneCount}/{QC_ITEMS.length} {allChecked ? '✓ All clear' : 'completed'}
+          </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
           {QC_ITEMS.map(item => (
-            <span key={item} style={{ fontSize: 12, color: 'var(--green-text)' }}>
-              <i className="ti ti-check" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />{item}
-            </span>
+            <div key={item}
+              onClick={() => setChecks(prev => ({ ...prev, [item]: !prev[item] }))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                fontSize: 12, color: checks[item] ? 'var(--green-text)' : 'var(--text2)',
+                userSelect: 'none', padding: '2px 0',
+              }}
+            >
+              <i className={`ti ti-${checks[item] ? 'square-check' : 'square'}`} style={{ fontSize: 14 }} />
+              {item}
+            </div>
           ))}
         </div>
       </Card>
@@ -82,8 +105,14 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>
                       <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
                     </Btn>
-                    <Btn variant="success" size="sm" onClick={() => onApprove(c.ref)}>
+                    <Btn variant="success" size="sm" disabled={!allChecked}
+                      title={allChecked ? '' : 'Tick all final checks above before approving'}
+                      onClick={() => handleApprove(c.ref)}>
                       <i className="ti ti-circle-check" style={{ fontSize: 13 }} /> HR Approve
+                    </Btn>
+                    <Btn size="sm" onClick={() => setFeedbackModal(c)}
+                      style={{ borderColor: 'var(--purple-text)', color: 'var(--purple-text)' }}>
+                      <i className="ti ti-message-exclamation" style={{ fontSize: 13 }} /> Request changes
                     </Btn>
                     <Btn variant="danger" size="sm" onClick={() => setRejectModal(c)}>
                       <i className="ti ti-x" style={{ fontSize: 13 }} /> Reject
@@ -97,10 +126,14 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
       </Card>
 
       {rejectModal && (
-        <RejectModal
-          claim={rejectModal}
-          onConfirm={onReject}
-          onClose={() => setRejectModal(null)}
+        <RejectModal claim={rejectModal} onConfirm={onReject} onClose={() => setRejectModal(null)} />
+      )}
+      {feedbackModal && (
+        <FeedbackRequestModal
+          claim={feedbackModal}
+          recipientLabel="Verifier"
+          onSubmit={onRequestFeedback}
+          onClose={() => setFeedbackModal(null)}
         />
       )}
     </div>

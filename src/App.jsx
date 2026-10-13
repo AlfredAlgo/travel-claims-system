@@ -114,11 +114,11 @@ function AppShell() {
             claims={claims.filter(c => c.persal === user?.persal)}
             onNav={onNav}
             onViewClaim={setSelectedClaim}
-            onRespondInfo={async (ref, message, docLinks, attachments) => {
+            onRespondFeedback={async (ref, message, attachments) => {
               try {
-                const updated = await api.respondInfo(ref, message, docLinks, attachments);
+                const updated = await api.respondFeedback(ref, message, attachments);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — response submitted. HRS has been notified.`);
+                toast(`${ref} — response submitted`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             toast={toast}
@@ -142,6 +142,13 @@ function AppShell() {
                 toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
+            onRequestFeedback={async (ref, message) => {
+              try {
+                const updated = await api.requestFeedback(ref, message);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — changes requested from official`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
           />
         );
 
@@ -160,6 +167,20 @@ function AppShell() {
               try {
                 await updateStatus(ref, 'rejected', { note });
                 toast(`${ref} rejected — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRequestFeedback={async (ref, message) => {
+              try {
+                const updated = await api.requestFeedback(ref, message);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — changes requested from official`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRespondFeedback={async (ref, message, attachments) => {
+              try {
+                const updated = await api.respondFeedback(ref, message, attachments);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — response submitted`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />
@@ -182,6 +203,20 @@ function AppShell() {
                 toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
+            onRequestFeedback={async (ref, message) => {
+              try {
+                const updated = await api.requestFeedback(ref, message);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — changes requested from compiler`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRespondFeedback={async (ref, message, attachments) => {
+              try {
+                const updated = await api.respondFeedback(ref, message, attachments);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — response submitted`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
           />
         );
 
@@ -200,6 +235,13 @@ function AppShell() {
               try {
                 await updateStatus(ref, 'rejected', { note });
                 toast(`${ref} rejected — official notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRequestFeedback={async (ref, message) => {
+              try {
+                const updated = await api.requestFeedback(ref, message);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — changes requested from verifier`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />
@@ -222,12 +264,12 @@ function AppShell() {
                 toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestInfo={async (ref, message) => {
+            onRequestFeedback={async (ref, message) => {
               try {
-                const updated = await api.requestInfo(ref, message);
+                const updated = await api.requestFeedback(ref, message);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
                 setSelectedClaim(prev => prev?.ref === ref ? updated : prev);
-                toast(`${ref} — information request sent to official`);
+                toast(`${ref} — changes requested from official`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />

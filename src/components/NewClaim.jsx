@@ -6,6 +6,7 @@ import { buildAttachment } from '../utils/api';
 const today = new Date().toISOString().split('T')[0];
 
 const DOC_TYPES = [
+  { id: 'logbook',  label: 'Log book / trip log sheet' },
   { id: 'attend',   label: 'Attendance register' },
   { id: 'invite',   label: 'Meeting invite / agenda' },
   { id: 'tariff',   label: 'Monthly tariffs' },
@@ -308,6 +309,8 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
     if (!purpose.trim()) e.push('Purpose of travel is required');
     if (trips.length === 0 || !trips[0].km) e.push('At least one trip with km is required');
     if (!tariffRate || parseFloat(tariffRate) <= 0) e.push('Tariff rate (R/km) is required');
+    if (!attachments.some(a => a.fieldKey === 't118_circular')) e.push('T118 tariff circular document must be uploaded');
+    if (!attachments.some(a => a.fieldKey === 'log_book')) e.push('Log book / trip log sheet must be uploaded');
     if (isLate) {
       const hasLetter = attachments.some(a => a.fieldKey === 'late_letter');
       if (!hasLetter) e.push('Late Submission Letter must be uploaded (travel was more than 30 days ago)');
@@ -520,11 +523,33 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
           </Field>
         </FormRow>
         {tariffInfo && (
-          <div style={{ padding: '8px 12px', background: 'var(--blue-bg)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--blue-text)' }}>
+          <div style={{ padding: '8px 12px', background: 'var(--blue-bg)', borderRadius: 'var(--radius)', fontSize: 13, color: 'var(--blue-text)', marginBottom: 10 }}>
             <i className="ti ti-info-circle" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
             {tariffInfo}
           </div>
         )}
+
+        <div style={{
+          padding: '10px 14px', background: 'var(--amber-bg)', borderRadius: 'var(--radius)',
+          fontSize: 13, color: 'var(--amber-text)', marginBottom: 10,
+          display: 'flex', gap: 8, alignItems: 'flex-start',
+        }}>
+          <i className="ti ti-alert-triangle" style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }} />
+          <div>
+            <strong>You must use the current T118 tariff rate.</strong> Obtain the latest DPSA T118 circular from your departmental HRS or the DPSA website before entering your tariff rate above.
+            The circular must be uploaded below — claims submitted with an incorrect or outdated rate will be returned by the compiler.
+          </div>
+        </div>
+
+        <FileUpload
+          fieldKey="t118_circular"
+          label="T118 Tariff Circular (current month) *"
+          accept=".pdf,.jpg,.jpeg,.png"
+          files={attachments}
+          onAdd={handleFileAdd}
+          onRemove={handleFileRemove}
+          hint="Required — upload the DPSA T118 circular confirming the tariff rate you entered above"
+        />
       </Card>
 
       {/* Trips */}
@@ -564,12 +589,21 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <FileUpload
-            fieldKey="general"
-            label="Supporting documents"
+            fieldKey="log_book"
+            label="Log book / trip log sheet *"
+            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
             files={attachments}
             onAdd={handleFileAdd}
             onRemove={handleFileRemove}
-            hint="Upload PDFs, images, or Word documents"
+            hint="Required — upload your vehicle log book or completed log sheet showing odometer readings per trip"
+          />
+          <FileUpload
+            fieldKey="general"
+            label="Other supporting documents"
+            files={attachments}
+            onAdd={handleFileAdd}
+            onRemove={handleFileRemove}
+            hint="Trip authority / approved memo, vehicle registration, any other supporting documents"
           />
           {isLate && (
             <FileUpload

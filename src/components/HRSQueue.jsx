@@ -83,12 +83,20 @@ const QC_CHECKS = [
   'Tariff category & rate verified', 'Reason for travel stated',
 ];
 
-export default function HRSQueue({ claims, onPay, onRequestInfo, onReject, onViewClaim }) {
+export default function HRSQueue({ claims, onPay, onRequestFeedback, onReject, onViewClaim }) {
   const queue = claims.filter(c => c.status === 'hr_approved');
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
   const [infoModal,   setInfoModal]   = useState(null);
   const [rejectModal, setRejectModal] = useState(null);
+  const [checks, setChecks] = useState({});
+  const allChecked = QC_CHECKS.every(item => checks[item]);
+  const doneCount  = QC_CHECKS.filter(item => checks[item]).length;
+
+  async function handlePay(ref) {
+    await onPay(ref);
+    setChecks({});
+  }
 
   return (
     <div>
@@ -102,15 +110,28 @@ export default function HRSQueue({ claims, onPay, onRequestInfo, onReject, onVie
       </div>
 
       <Card style={{ marginBottom: '1rem', background: 'var(--blue-bg)', border: '0.5px solid var(--blue)' }}>
-        <div style={{ fontSize: 12, color: 'var(--blue-text)', fontWeight: 500, marginBottom: 6 }}>
-          <i className="ti ti-list-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
-          Quality checks before processing:
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--blue-text)', fontWeight: 500 }}>
+            <i className="ti ti-list-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
+            Quality checks before processing — tick each before marking paid:
+          </div>
+          <span style={{ fontSize: 11, color: allChecked ? 'var(--green-text)' : 'var(--blue-text)', fontWeight: 500 }}>
+            {doneCount}/{QC_CHECKS.length} {allChecked ? '✓ All clear' : 'completed'}
+          </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
           {QC_CHECKS.map(item => (
-            <span key={item} style={{ fontSize: 12, color: 'var(--blue-text)' }}>
-              <i className="ti ti-check" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />{item}
-            </span>
+            <div key={item}
+              onClick={() => setChecks(prev => ({ ...prev, [item]: !prev[item] }))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                fontSize: 12, color: checks[item] ? 'var(--green-text)' : 'var(--blue-text)',
+                userSelect: 'none', padding: '2px 0',
+              }}
+            >
+              <i className={`ti ti-${checks[item] ? 'square-check' : 'square'}`} style={{ fontSize: 14 }} />
+              {item}
+            </div>
           ))}
         </div>
       </Card>
@@ -184,7 +205,9 @@ export default function HRSQueue({ claims, onPay, onRequestInfo, onReject, onVie
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>
                       <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
                     </Btn>
-                    <Btn variant="success" size="sm" onClick={() => onPay(c.ref)}>
+                    <Btn variant="success" size="sm" disabled={!allChecked}
+                      title={allChecked ? '' : 'Tick all QC checks above before marking as paid'}
+                      onClick={() => handlePay(c.ref)}>
                       <i className="ti ti-check" style={{ fontSize: 13 }} /> Mark paid
                     </Btn>
                     <Btn size="sm" onClick={() => setInfoModal(c)}
@@ -203,7 +226,7 @@ export default function HRSQueue({ claims, onPay, onRequestInfo, onReject, onVie
       </Card>
 
       {infoModal && (
-        <RequestInfoModal claim={infoModal} onSubmit={onRequestInfo} onClose={() => setInfoModal(null)} />
+        <RequestInfoModal claim={infoModal} onSubmit={onRequestFeedback} onClose={() => setInfoModal(null)} />
       )}
       {rejectModal && (
         <RejectModal claim={rejectModal} onConfirm={onReject} onClose={() => setRejectModal(null)} />

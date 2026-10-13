@@ -55,6 +55,7 @@ const DB_CAPS = {
   tariffSchedules: false,
   delegations:     false,
   slaTargets:      false,
+  feedbackMeta:    false,
 };
 
 async function detectDbCapabilities() {
@@ -68,8 +69,9 @@ async function detectDbCapabilities() {
     supabase.from('tariff_schedules').select('id').limit(0),
     supabase.from('delegations').select('id').limit(0),
     supabase.from('sla_targets').select('status').limit(0),
+    supabase.from('claims').select('feedback_recipient_role').limit(0),
   ]);
-  const keys = ['userEmail','infoMessage','docLinks','vehicleCategory','tariffRate','attachments','tariffSchedules','delegations','slaTargets'];
+  const keys = ['userEmail','infoMessage','docLinks','vehicleCategory','tariffRate','attachments','tariffSchedules','delegations','slaTargets','feedbackMeta'];
   checks.forEach((r, i) => { DB_CAPS[keys[i]] = !r.error; });
   console.log('DB capabilities:', DB_CAPS);
 }
@@ -188,6 +190,8 @@ function normalizeClaim(row) {
       fileSize:  a.file_size,
       createdAt: a.created_at,
     })),
+    feedbackRecipientRole: row.feedback_recipient_role || null,
+    feedbackReturnStatus:  row.feedback_return_status  || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -608,13 +612,23 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 // ── Info request (HRS on hr_approved claims) ──────────────────────────────────
 
 app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
-  if (req.user.role !== 'hrs') return res.status(403).json({ error: 'Forbidden' });
+  // Each role can request changes from the previous stage actor
+  const FEEDBACK_ROUTES = {
+    supervisor: { recipientRole: 'official',  returnStatus: 'pending',     requiredStatus: 'pending'     },
+    compiler:   { recipientRole: 'official',  returnStatus: 'approved',    requiredStatus: 'approved'    },
+    verifier:   { recipientRole: 'compiler',  returnStatus: 'compiled',    requiredStatus: 'compiled'    },
+    approver:   { recipientRole: 'verifier',  returnStatus: 'verified',    requiredStatus: 'verified'    },
+    hrs:        { recipientRole: 'official',  returnStatus: 'hr_approved', requiredStatus: 'hr_approved' },
+  };
+  const route = FEEDBACK_ROUTES[req.user.role];
+  if (!route) return res.status(403).json({ error: 'Forbidden' });
 
   const { ref } = req.params;
   const { message } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
 
   const userSel = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
+  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
   const { data: existing, error: fetchErr } = await supabase
     .from('claims')
     .select(`id, status, name, purpose, amount, user_id, ${userSel}`)
@@ -622,50 +636,65 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
     .single();
 
   if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
-  if (existing.status !== 'hr_approved') {
-    return res.status(400).json({ error: 'Can only request info on hr_approved claims' });
+  if (existing.status !== route.requiredStatus) {
+    return res.status(400).json({ error: `Claim must be in '${route.requiredStatus}' status` });
   }
 
+  const claimUpdates = {
+    status: 'info_requested',
+    ...(DB_CAPS.feedbackMeta ? {
+      feedback_recipient_role: route.recipientRole,
+      feedback_return_status:  route.returnStatus,
+    } : {}),
+  };
+
   const { data: updated, error } = await supabase
-    .from('claims').update({ status: 'info_requested' }).eq('ref', ref)
-    .select('*, trips(*)').single();
+    .from('claims').update(claimUpdates).eq('ref', ref)
+    .select(`*, trips(*)${attachSel}`).single();
 
   if (error) return res.status(500).json({ error: error.message });
 
   await supabase.from('claim_status_history').insert({
-    claim_id: existing.id, from_status: 'hr_approved', to_status: 'info_requested',
+    claim_id: existing.id, from_status: route.requiredStatus, to_status: 'info_requested',
     changed_by: req.user.id, note: message,
     ...(DB_CAPS.infoMessage ? { info_message: message } : {}),
   });
 
-  const officialEmail = existing.users?.email;
+  // Notify recipient (official = claim owner, otherwise notify all users with that role)
+  const ROLE_LABELS = { official: 'Official', compiler: 'Compiler', verifier: 'Verifier', approver: 'HR Approver', hrs: 'HRS' };
+  let recipientEmails = [];
+  if (route.recipientRole === 'official') {
+    if (existing.users?.email) recipientEmails = [existing.users.email];
+  } else {
+    recipientEmails = await getEmailsByRole(route.recipientRole);
+  }
   sendEmail({
-    to: officialEmail,
-    subject: `[GPG Claims] Additional information required — ${ref}`,
-    html: emailTemplate('Additional information required for your claim',
-      `<p>HRS requires additional information before your claim can be processed.</p>
+    to: recipientEmails,
+    subject: `[GPG Claims] Changes requested — ${ref}`,
+    html: emailTemplate(`Changes requested on claim ${ref}`,
+      `<p>${ROLE_LABELS[req.user.role] || req.user.role} has requested changes to this claim before it can proceed.</p>
        <p><strong>Ref:</strong> ${ref} · <strong>Purpose:</strong> ${existing.purpose || '—'}</p>
        <div style="margin-top:16px;padding:14px;background:#f3f0ff;border-left:3px solid #534AB7;border-radius:4px">
-         <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Information requested:</p>
+         <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Changes requested:</p>
          <p style="margin:8px 0 0;font-size:14px">${message}</p>
        </div>
-       <p style="margin-top:16px">Please log in to respond from your claims portal.</p>`),
+       <p style="margin-top:16px">Please log in to respond from your portal. You may attach replacement documents in your response.</p>`),
   });
 
   res.json(normalizeClaim(updated));
 });
 
-// ── Official responds to info request ────────────────────────────────────────
+// ── Respond to feedback / info request (any authorised role) ─────────────────
 
 app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   const { ref } = req.params;
-  const { message, docLinks, attachments: newAttachments } = req.body;
+  const { message, attachments: newAttachments } = req.body;
 
+  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
   const { data: existing, error: fetchErr } = await supabase
     .from('claims')
-    .select('id, status, name, purpose, amount')
+    .select(`id, status, name, purpose, persal, feedback_recipient_role, feedback_return_status`)
     .eq('ref', ref)
-    .eq('persal', req.user.persal)
     .single();
 
   if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
@@ -673,19 +702,33 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Claim is not in info_requested state' });
   }
 
-  const updates = { status: 'hr_approved' }; // returns to hr_approved, not approved
-  if (DB_CAPS.docLinks && docLinks) updates.doc_links = docLinks;
+  // Authorisation: officials are matched by persal; all other recipients by role
+  const recipientRole = existing.feedback_recipient_role || 'official';
+  if (recipientRole === 'official') {
+    if (existing.persal !== req.user.persal) return res.status(403).json({ error: 'Forbidden' });
+  } else {
+    const delegated = await getActiveDelegatedRoles(req.user.id);
+    if (req.user.role !== recipientRole && !delegated.includes(recipientRole)) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+  }
+
+  const returnStatus = existing.feedback_return_status || 'hr_approved';
+  const updates = {
+    status: returnStatus,
+    ...(DB_CAPS.feedbackMeta ? { feedback_recipient_role: null, feedback_return_status: null } : {}),
+  };
 
   const { data: updated, error } = await supabase
     .from('claims').update(updates).eq('ref', ref)
-    .select('*, trips(*)').single();
+    .select(`*, trips(*)${attachSel}`).single();
 
   if (error) return res.status(500).json({ error: error.message });
 
   // Store any new attachments
   if (DB_CAPS.attachments && (newAttachments || []).length > 0) {
     const rows = newAttachments.filter(a => a.fileData && a.fileName).map(a => ({
-      claim_id: existing.id, field_key: a.fieldKey || 'response',
+      claim_id: existing.id, field_key: a.fieldKey || 'feedback-response',
       file_name: a.fileName, file_data: a.fileData,
       mime_type: a.mimeType || 'application/octet-stream',
       file_size: a.fileSize || 0, uploaded_by: req.user.id,
@@ -694,17 +737,26 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   }
 
   await supabase.from('claim_status_history').insert({
-    claim_id: existing.id, from_status: 'info_requested', to_status: 'hr_approved',
-    changed_by: req.user.id, note: message || 'Additional information provided',
+    claim_id: existing.id, from_status: 'info_requested', to_status: returnStatus,
+    changed_by: req.user.id, note: message || 'Response provided',
     ...(DB_CAPS.infoMessage ? { info_message: message || '' } : {}),
   });
 
-  const hrsEmails = await getEmailsByRole('hrs');
+  // Notify the stage that is now responsible for this claim
+  const STAGE_ROLES = {
+    pending:     ['supervisor'],
+    approved:    ['compiler'],
+    compiled:    ['verifier'],
+    verified:    ['approver'],
+    hr_approved: ['hrs'],
+  };
+  const notifyRoles = STAGE_ROLES[returnStatus] || [];
+  const notifyEmails = await getEmailsByRole(...notifyRoles);
   sendEmail({
-    to: hrsEmails,
-    subject: `[GPG Claims] Information provided — ${ref}`,
-    html: emailTemplate('Official has responded to your information request',
-      `<p><strong>${existing.name}</strong> has provided the additional information and the claim is back in your queue.</p>
+    to: notifyEmails,
+    subject: `[GPG Claims] Response provided — ${ref}`,
+    html: emailTemplate('Claim changes have been addressed',
+      `<p><strong>${existing.name}</strong> has responded to the changes request. The claim is back in your queue.</p>
        ${message ? `<div style="margin-top:16px;padding:14px;background:#f0fdf4;border-left:3px solid #3B6D11;border-radius:4px"><p style="margin:0;font-size:13px;font-weight:bold;color:#666">Response:</p><p style="margin:8px 0 0;font-size:14px">${message}</p></div>` : ''}
        <p style="margin-top:16px">Claim ref: <strong>${ref}</strong></p>`),
   });

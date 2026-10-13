@@ -5,14 +5,20 @@ import { useAuth } from '../context/AuthContext';
 const DEMO_ACCOUNTS = [
   { username: 'dlamini', password: 'pass123',  role: 'Official',     name: 'T. Dlamini',  dept: 'GPG — Health' },
   { username: 'khumalo', password: 'pass123',  role: 'Supervisor',   name: 'N. Khumalo',  dept: 'GPG — Finance' },
-  { username: 'sithole', password: 'pass123',  role: 'Internal HR',  name: 'B. Sithole',  dept: 'GPG — Internal HR' },
+  { username: 'mokoena', password: 'pass123',  role: 'Compiler',     name: 'P. Mokoena',  dept: 'GPG — Internal HR' },
+  { username: 'nkosi',   password: 'pass123',  role: 'Verifier',     name: 'L. Nkosi',    dept: 'GPG — Internal HR' },
+  { username: 'dube',    password: 'pass123',  role: 'HR Approver',  name: 'S. Dube',     dept: 'GPG — Internal HR' },
+  { username: 'sithole', password: 'pass123',  role: 'HRS',          name: 'B. Sithole',  dept: 'GPG — HRS Payroll' },
   { username: 'admin',   password: 'admin123', role: 'System Admin', name: 'Admin User',  dept: 'GPG — Admin' },
 ];
 
 const ROLE_STYLE = {
   'Official':     { bg: '#E1F5EE', color: '#0F6E56' },
   'Supervisor':   { bg: '#FAEEDA', color: '#854F0B' },
-  'Internal HR':  { bg: '#E6F1FB', color: '#185FA5' },
+  'Compiler':     { bg: '#E6F1FB', color: '#185FA5' },
+  'Verifier':     { bg: '#E6F1FB', color: '#185FA5' },
+  'HR Approver':  { bg: '#EAFAF0', color: '#3B6D11' },
+  'HRS':          { bg: '#E6F1FB', color: '#185FA5' },
   'System Admin': { bg: '#F1EFE8', color: '#5F5E5A' },
 };
 
@@ -113,9 +119,12 @@ export default function Login() {
             Claim workflow
           </div>
           {[
-            { step: 'Official', action: 'Submit claim' },
-            { step: 'Supervisor', action: 'Approve' },
-            { step: 'Internal HR', action: 'Process & pay' },
+            { step: 'Official',    action: 'Submit claim' },
+            { step: 'Supervisor',  action: 'Approve' },
+            { step: 'Compiler',    action: 'Compile & calculate' },
+            { step: 'Verifier',    action: 'Verify claim' },
+            { step: 'HR Approver', action: 'Final HR sign-off' },
+            { step: 'HRS',         action: 'Process payment' },
           ].map((s, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
               <div style={{

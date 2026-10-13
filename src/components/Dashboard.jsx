@@ -112,27 +112,46 @@ const fmtR = v => `R ${Number(v).toFixed(0)}`;
 // ── Date range filter ─────────────────────────────────────────────────────────
 
 const DATE_RANGES = [
-  { value: 'all',  label: 'All time' },
-  { value: '30d',  label: 'Last 30 days' },
-  { value: '3m',   label: 'Last 3 months' },
-  { value: '6m',   label: 'Last 6 months' },
-  { value: '12m',  label: 'Last 12 months' },
-  { value: 'fy',   label: 'Financial year (Apr–Mar)' },
+  { value: 'all',     label: 'All time' },
+  { value: '30d',     label: 'Last 30 days' },
+  { value: '3m',      label: 'Last 3 months' },
+  { value: '6m',      label: 'Last 6 months' },
+  { value: '12m',     label: 'Last 12 months' },
+  { value: 'fy-cur',  label: 'Current FY (Apr – Mar)' },
+  { value: 'fy-2627', label: 'FY 2026/27  (Apr 2026 – Mar 2027)' },
+  { value: 'fy-2526', label: 'FY 2025/26  (Apr 2025 – Mar 2026)' },
+  { value: 'fy-2425', label: 'FY 2024/25  (Apr 2024 – Mar 2025)' },
+  { value: 'fy-2324', label: 'FY 2023/24  (Apr 2023 – Mar 2024)' },
+  { value: 'fy-2223', label: 'FY 2022/23  (Apr 2022 – Mar 2023)' },
 ];
+
+function fyBounds(startYear) {
+  return { from: new Date(startYear, 3, 1), to: new Date(startYear + 1, 3, 1) };
+}
 
 function filterByRange(claims, range) {
   if (range === 'all') return claims;
   const now = new Date();
-  let from;
-  if (range === '30d')  from = new Date(now - 30 * 86400e3);
-  else if (range === '3m')  from = new Date(now.getFullYear(), now.getMonth() - 3, 1);
-  else if (range === '6m')  from = new Date(now.getFullYear(), now.getMonth() - 6, 1);
-  else if (range === '12m') from = new Date(now.getFullYear(), now.getMonth() - 12, 1);
-  else if (range === 'fy') {
+  let from, to;
+
+  if (range === '30d')  { from = new Date(now - 30 * 86400e3); }
+  else if (range === '3m')  { from = new Date(now.getFullYear(), now.getMonth() - 3, 1); }
+  else if (range === '6m')  { from = new Date(now.getFullYear(), now.getMonth() - 6, 1); }
+  else if (range === '12m') { from = new Date(now.getFullYear(), now.getMonth() - 12, 1); }
+  else if (range === 'fy-cur') {
     const yr = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-    from = new Date(yr, 3, 1); // 1 April
+    ({ from, to } = fyBounds(yr));
   }
-  return claims.filter(c => new Date(c.createdAt || 0) >= from);
+  else if (range === 'fy-2627') { ({ from, to } = fyBounds(2026)); }
+  else if (range === 'fy-2526') { ({ from, to } = fyBounds(2025)); }
+  else if (range === 'fy-2425') { ({ from, to } = fyBounds(2024)); }
+  else if (range === 'fy-2324') { ({ from, to } = fyBounds(2023)); }
+  else if (range === 'fy-2223') { ({ from, to } = fyBounds(2022)); }
+
+  return claims.filter(c => {
+    const d = new Date(c.createdAt || 0);
+    return d >= from && (!to || d < to);
+  });
 }
 
 function DateRangeFilter({ value, onChange }) {

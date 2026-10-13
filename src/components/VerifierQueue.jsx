@@ -3,18 +3,34 @@ import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
 import RejectModal from './RejectModal';
 import SLABadge from './SLABadge';
+import FeedbackRequestModal from './FeedbackRequestModal';
+import { FeedbackRespondModal } from './MyClaims';
 
 const QC_ITEMS = [
   'Compilation accuracy checked', 'Allocation codes match Persal function 5.3.11',
-  'Vehicle category & tariff match T118 circular', 'Late submission letter present (if applicable)',
+  'T118 circular document attached & tariff rate verified against it',
+  'Vehicle category confirmed against registration document',
+  'Late submission letter present (if applicable)',
   'Duplicate exception documented (if applicable)', 'Total km vs route plausibility',
 ];
 
-export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim }) {
-  const queue = claims.filter(c => c.status === 'compiled');
+export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
+  const queue           = claims.filter(c => c.status === 'compiled');
+  const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'verifier');
+
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
-  const [rejectModal, setRejectModal] = useState(null);
+  const [rejectModal,   setRejectModal]   = useState(null);
+  const [feedbackModal, setFeedbackModal] = useState(null);
+  const [respondModal,  setRespondModal]  = useState(null);
+  const [checks, setChecks] = useState({});
+  const allChecked = QC_ITEMS.every(item => checks[item]);
+  const doneCount  = QC_ITEMS.filter(item => checks[item]).length;
+
+  async function handleVerify(ref) {
+    await onVerify(ref);
+    setChecks({});
+  }
 
   return (
     <div>
@@ -27,16 +43,62 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim 
         </div>
       </div>
 
+      {/* Changes requested FROM approver — verifier must respond */}
+      {feedbackPending.length > 0 && (
+        <div style={{
+          background: 'var(--amber-bg)', border: '0.5px solid var(--amber-text)',
+          borderRadius: 'var(--radius-lg)', padding: '12px 16px', marginBottom: '1rem',
+        }}>
+          <div style={{ fontWeight: 500, fontSize: 13, color: 'var(--amber-text)', marginBottom: 6 }}>
+            <i className="ti ti-message-exclamation" style={{ fontSize: 15, marginRight: 6, verticalAlign: -2 }} />
+            {feedbackPending.length} claim{feedbackPending.length > 1 ? 's' : ''} awaiting your corrections (requested by HR Approver)
+          </div>
+          {feedbackPending.map(c => (
+            <div key={c.ref} style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '6px 0', borderTop: '0.5px solid var(--amber-text)30',
+            }}>
+              <div>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 12, marginRight: 8 }}>{c.ref}</span>
+                <span style={{ fontSize: 12, color: 'var(--text2)' }}>{c.name} · {c.purpose}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <Btn size="sm" onClick={() => onViewClaim?.(c)}>
+                  <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
+                </Btn>
+                <Btn size="sm" onClick={() => setRespondModal(c)}
+                  style={{ borderColor: 'var(--amber-text)', color: 'var(--amber-text)' }}>
+                  <i className="ti ti-send" style={{ fontSize: 13 }} /> Respond
+                </Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <Card style={{ marginBottom: '1rem', background: 'var(--blue-bg)', border: '0.5px solid var(--blue)' }}>
-        <div style={{ fontSize: 12, color: 'var(--blue-text)', fontWeight: 500, marginBottom: 6 }}>
-          <i className="ti ti-shield-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
-          Verification checklist:
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <div style={{ fontSize: 12, color: 'var(--blue-text)', fontWeight: 500 }}>
+            <i className="ti ti-shield-check" style={{ fontSize: 15, verticalAlign: -2, marginRight: 6 }} />
+            Verification checklist — tick each before verifying:
+          </div>
+          <span style={{ fontSize: 11, color: allChecked ? 'var(--green-text)' : 'var(--blue-text)', fontWeight: 500 }}>
+            {doneCount}/{QC_ITEMS.length} {allChecked ? '✓ All clear' : 'completed'}
+          </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
           {QC_ITEMS.map(item => (
-            <span key={item} style={{ fontSize: 12, color: 'var(--blue-text)' }}>
-              <i className="ti ti-check" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />{item}
-            </span>
+            <div key={item}
+              onClick={() => setChecks(prev => ({ ...prev, [item]: !prev[item] }))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer',
+                fontSize: 12, color: checks[item] ? 'var(--green-text)' : 'var(--blue-text)',
+                userSelect: 'none', padding: '2px 0',
+              }}
+            >
+              <i className={`ti ti-${checks[item] ? 'square-check' : 'square'}`} style={{ fontSize: 14 }} />
+              {item}
+            </div>
           ))}
         </div>
       </Card>
@@ -87,8 +149,14 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim 
                     <Btn size="sm" onClick={() => onViewClaim?.(c)}>
                       <i className="ti ti-eye" style={{ fontSize: 13 }} /> View
                     </Btn>
-                    <Btn variant="success" size="sm" onClick={() => onVerify(c.ref)}>
+                    <Btn variant="success" size="sm" disabled={!allChecked}
+                      title={allChecked ? '' : 'Tick all verification checks above before verifying'}
+                      onClick={() => handleVerify(c.ref)}>
                       <i className="ti ti-shield-check" style={{ fontSize: 13 }} /> Verify
+                    </Btn>
+                    <Btn size="sm" onClick={() => setFeedbackModal(c)}
+                      style={{ borderColor: 'var(--purple-text)', color: 'var(--purple-text)' }}>
+                      <i className="ti ti-message-exclamation" style={{ fontSize: 13 }} /> Request changes
                     </Btn>
                     <Btn variant="danger" size="sm" onClick={() => setRejectModal(c)}>
                       <i className="ti ti-x" style={{ fontSize: 13 }} /> Reject
@@ -102,10 +170,22 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim 
       </Card>
 
       {rejectModal && (
-        <RejectModal
-          claim={rejectModal}
-          onConfirm={onReject}
-          onClose={() => setRejectModal(null)}
+        <RejectModal claim={rejectModal} onConfirm={onReject} onClose={() => setRejectModal(null)} />
+      )}
+      {feedbackModal && (
+        <FeedbackRequestModal
+          claim={feedbackModal}
+          recipientLabel="Compiler"
+          onSubmit={onRequestFeedback}
+          onClose={() => setFeedbackModal(null)}
+        />
+      )}
+      {respondModal && (
+        <FeedbackRespondModal
+          claim={respondModal}
+          senderLabel="HR Approver"
+          onSubmit={onRespondFeedback}
+          onClose={() => setRespondModal(null)}
         />
       )}
     </div>
