@@ -4,8 +4,8 @@
 -- Compatible with: Azure Database for PostgreSQL Flexible Server
 -- =============================================================================
 
--- Enable UUID generation
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- gen_random_uuid() is built-in from PostgreSQL 13+ — no extension needed.
+-- Azure Database for PostgreSQL does not allow pgcrypto by default.
 
 -- =============================================================================
 -- USERS
