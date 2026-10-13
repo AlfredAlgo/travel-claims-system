@@ -1,18 +1,39 @@
 require('dotenv').config();
-const express  = require('express');
-const jwt      = require('jsonwebtoken');
-const cors     = require('cors');
+const express    = require('express');
+const jwt        = require('jsonwebtoken');
+const cors       = require('cors');
 const nodemailer = require('nodemailer');
-const path     = require('path');
-const { createClient } = require('@supabase/supabase-js');
+const path       = require('path');
+const { Pool }   = require('pg');
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'gpg-travel-dev-secret-change-in-prod';
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-);
+// DATABASE_URL works for both Azure PostgreSQL and Supabase direct PostgreSQL.
+// Azure:    postgresql://user@host:pass@host.postgres.database.azure.com:5432/db?sslmode=require
+// Supabase: postgresql://postgres:pass@db.[ref].supabase.co:5432/postgres
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
+
+// Lightweight query helper
+const db = { query: (text, params) => pool.query(text, params) };
+
+// ── DB helper: fetch a claim with its trips and attachments ──────────────────
+async function getClaimFull(where, param) {
+  const { rows: [claim] } = await db.query(`SELECT * FROM claims WHERE ${where} = $1`, [param]);
+  if (!claim) return null;
+  const [tripsRes, attRes] = await Promise.all([
+    db.query('SELECT * FROM trips WHERE claim_id = $1 ORDER BY trip_order ASC', [claim.id]),
+    DB_CAPS.attachments
+      ? db.query('SELECT id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = $1', [claim.id])
+      : Promise.resolve({ rows: [] }),
+  ]);
+  claim.trips = tripsRes.rows;
+  claim.claim_attachments = attRes.rows;
+  return claim;
+}
 
 const isProd = process.env.NODE_ENV === 'production';
 app.use(cors(isProd ? {} : { origin: 'http://localhost:3000', credentials: true }));
@@ -58,21 +79,39 @@ const DB_CAPS = {
   feedbackMeta:    false,
 };
 
+async function colExists(table, column) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2 LIMIT 1`,
+    [table, column]
+  );
+  return rows.length > 0;
+}
+
+async function tableExists(table) {
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.tables WHERE table_name=$1 LIMIT 1`,
+    [table]
+  );
+  return rows.length > 0;
+}
+
 async function detectDbCapabilities() {
-  const checks = await Promise.all([
-    supabase.from('users').select('email').limit(0),
-    supabase.from('claim_status_history').select('info_message').limit(0),
-    supabase.from('claims').select('doc_links').limit(0),
-    supabase.from('claims').select('vehicle_category').limit(0),
-    supabase.from('claims').select('tariff_rate').limit(0),
-    supabase.from('claim_attachments').select('id').limit(0),
-    supabase.from('tariff_schedules').select('id').limit(0),
-    supabase.from('delegations').select('id').limit(0),
-    supabase.from('sla_targets').select('status').limit(0),
-    supabase.from('claims').select('feedback_recipient_role').limit(0),
+  const [
+    userEmail, infoMessage, docLinks, vehicleCategory, tariffRate,
+    attachments, tariffSchedules, delegations, slaTargets, feedbackMeta,
+  ] = await Promise.all([
+    colExists('users',                'email'),
+    colExists('claim_status_history', 'info_message'),
+    colExists('claims',               'doc_links'),
+    colExists('claims',               'vehicle_category'),
+    colExists('claims',               'tariff_rate'),
+    tableExists('claim_attachments'),
+    tableExists('tariff_schedules'),
+    tableExists('delegations'),
+    tableExists('sla_targets'),
+    colExists('claims',               'feedback_recipient_role'),
   ]);
-  const keys = ['userEmail','infoMessage','docLinks','vehicleCategory','tariffRate','attachments','tariffSchedules','delegations','slaTargets','feedbackMeta'];
-  checks.forEach((r, i) => { DB_CAPS[keys[i]] = !r.error; });
+  Object.assign(DB_CAPS, { userEmail, infoMessage, docLinks, vehicleCategory, tariffRate, attachments, tariffSchedules, delegations, slaTargets, feedbackMeta });
   console.log('DB capabilities:', DB_CAPS);
 }
 
@@ -80,20 +119,18 @@ async function detectDbCapabilities() {
 async function getActiveDelegatedRoles(userId) {
   if (!DB_CAPS.delegations) return [];
   const today = new Date().toISOString().slice(0, 10);
-  const { data } = await supabase
-    .from('delegations')
-    .select('role')
-    .eq('delegate_id', userId)
-    .eq('active', true)
-    .lte('start_date', today)
-    .gte('end_date', today);
-  return (data || []).map(d => d.role);
+  const { rows } = await db.query(
+    `SELECT role FROM delegations WHERE delegate_id=$1 AND active=true AND start_date<=$2 AND end_date>=$2`,
+    [userId, today]
+  );
+  return rows.map(d => d.role);
 }
 
 async function getEmailsByRole(...roles) {
-  if (!DB_CAPS.userEmail) return [];
-  const { data } = await supabase.from('users').select('email').in('role', roles);
-  return (data || []).map(u => u.email).filter(Boolean);
+  if (!DB_CAPS.userEmail || roles.length === 0) return [];
+  const placeholders = roles.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await db.query(`SELECT email FROM users WHERE role IN (${placeholders})`, roles);
+  return rows.map(u => u.email).filter(Boolean);
 }
 
 function emailTemplate(title, bodyHtml) {
@@ -203,10 +240,11 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
 
-  const { data: user, error } = await supabase
-    .from('users').select('*').eq('username', username).eq('password', password).single();
-
-  if (error || !user) return res.status(401).json({ error: 'Invalid username or password' });
+  const { rows } = await db.query(
+    'SELECT * FROM users WHERE username=$1 AND password=$2 LIMIT 1', [username, password]
+  );
+  const user = rows[0];
+  if (!user) return res.status(401).json({ error: 'Invalid username or password' });
 
   const payload = {
     id: user.id, name: user.name, persal: user.persal,
@@ -221,17 +259,36 @@ app.get('/api/auth/me', requireAuth, (req, res) => res.json(req.user));
 
 app.get('/api/claims', requireAuth, async (req, res) => {
   const { role, persal } = req.user;
-  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
-  let query = supabase
-    .from('claims')
-    .select(`*, trips(*)${attachSel}`)
-    .order('created_at', { ascending: false });
+  try {
+    const params = role === 'official' ? [persal] : [];
+    const where  = role === 'official' ? 'WHERE c.persal = $1' : '';
+    const { rows: claims } = await db.query(
+      `SELECT * FROM claims c ${where} ORDER BY c.created_at DESC`, params
+    );
+    const claimIds = claims.map(c => c.id);
+    if (claimIds.length === 0) return res.json([]);
 
-  if (role === 'official') query = query.eq('persal', persal);
+    const [tripsRes, attRes] = await Promise.all([
+      db.query(`SELECT * FROM trips WHERE claim_id = ANY($1::uuid[]) ORDER BY trip_order ASC`, [claimIds]),
+      DB_CAPS.attachments
+        ? db.query(`SELECT id,claim_id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = ANY($1::uuid[])`, [claimIds])
+        : Promise.resolve({ rows: [] }),
+    ]);
 
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data.map(normalizeClaim));
+    const tripsByClaimId = {};
+    tripsRes.rows.forEach(t => { (tripsByClaimId[t.claim_id] ||= []).push(t); });
+    const attsByClaimId = {};
+    attRes.rows.forEach(a => { (attsByClaimId[a.claim_id] ||= []).push(a); });
+
+    const full = claims.map(c => ({
+      ...c,
+      trips:             tripsByClaimId[c.id] || [],
+      claim_attachments: attsByClaimId[c.id]  || [],
+    }));
+    res.json(full.map(normalizeClaim));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/claims', requireAuth, async (req, res) => {
@@ -268,23 +325,19 @@ app.post('/api/claims', requireAuth, async (req, res) => {
     const dateVal   = firstTrip.dateFrom || firstTrip.date;
 
     if (originVal && destVal && dateVal) {
-      const { data: dup } = await supabase
-        .from('claims')
-        .select('id, ref')
-        .eq('persal', body.persal)
-        .neq('status', 'rejected')
-        .neq('status', 'draft')
-        .limit(200);
+      const { rows: dup } = await db.query(
+        `SELECT id, ref FROM claims WHERE persal=$1 AND status NOT IN ('rejected','draft') LIMIT 200`,
+        [body.persal]
+      );
 
-      if (dup && dup.length > 0) {
+      if (dup.length > 0) {
         const dupIds = dup.map(d => d.id);
-        const { data: dupTrips } = await supabase
-          .from('trips')
-          .select('claim_id, date_from, origin, dest')
-          .in('claim_id', dupIds)
-          .eq('date_from', dateVal)
-          .ilike('origin', originVal)
-          .ilike('dest', destVal);
+        const { rows: dupTrips } = await db.query(
+          `SELECT claim_id, date_from, origin, dest FROM trips
+           WHERE claim_id = ANY($1::uuid[]) AND date_from=$2
+             AND LOWER(origin) LIKE LOWER($3) AND LOWER(dest) LIKE LOWER($4)`,
+          [dupIds, dateVal, originVal, destVal]
+        );
 
         if (dupTrips && dupTrips.length > 0) {
           const dupClaim = dup.find(d => d.id === dupTrips[0].claim_id);
@@ -313,109 +366,84 @@ app.post('/api/claims', requireAuth, async (req, res) => {
   const year = new Date().getFullYear();
   const ref  = `TC-${year}-${String(Math.floor(Math.random() * 9000) + 1000)}`;
 
-  const { data: claim, error: claimErr } = await supabase
-    .from('claims')
-    .insert({
-      ref,
-      user_id:       user.id,
-      name:          body.name,
-      persal:        body.persal,
-      dept:          body.dept         || '',
-      contact:       body.contact      || '',
-      phone:         body.phone        || '',
-      purpose:       body.purpose,
-      logsheet:      body.logsheet     || '',
-      date_from:     body.dateFrom     || null,
-      date_to:       body.dateTo       || null,
-      vehicle_type:  body.vehicleType  || '',
-      engine_idx:    body.engineIdx    || '',
-      km_bracket:    body.kmBracket    || '',
-      // New vehicle fields
-      ...(DB_CAPS.vehicleCategory && {
-        vehicle_category:     body.vehicleCategory     || 'A',
-        fuel_type:            body.fuelType            || 'petrol',
-        engine_band:          body.engineBand          || '',
-        weight_band:          body.weightBand          || '',
-        reimbursement_scheme: body.reimbursementScheme || 'private',
-      }),
-      ...(DB_CAPS.tariffRate && {
-        tariff_rate: parseFloat(body.tariffRate) || 0,
-        persal_ref:  body.persalRef || '',
-        is_late_submission:    isLate,
-        late_submission_reason: body.lateSubmissionReason || '',
-        duplicate_exception:   !!body.duplicateException,
-        duplicate_exception_note: body.duplicateExceptionNote || '',
-      }),
-      reg:           body.reg          || '',
-      km:            body.km           || 0,
-      amount:        body.amount       || 0,
-      status:        isDraft ? 'draft' : 'pending',
-      docs:          body.docs         || [],
-      ...(DB_CAPS.docLinks && { doc_links: body.docLinks || [] }),
-      advance:       body.advance      || false,
-      adv_a:         body.advA         || 0,
-      adv_b:         body.advB         || 0,
-      adv_c:         body.advC         || 0,
-      alloc_amounts: body.allocAmounts || {},
-      sig_name:      body.sigName      || '',
-      sig_rank:      body.sigRank      || '',
-      sig_date:      body.sigDate      || null,
-    })
-    .select()
-    .single();
+  let claim, claimErr;
+  try {
+    const { rows } = await db.query(`
+      INSERT INTO claims (
+        ref, user_id, name, persal, dept, contact, phone, purpose, logsheet,
+        date_from, date_to, vehicle_type, engine_idx, km_bracket,
+        vehicle_category, fuel_type, engine_band, weight_band,
+        tariff_rate, persal_ref, reimbursement_scheme,
+        is_late_submission, late_submission_reason,
+        duplicate_exception, duplicate_exception_note,
+        reg, km, amount, status, docs, doc_links, advance,
+        adv_a, adv_b, adv_c, alloc_amounts, sig_name, sig_rank, sig_date
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,
+        $10,$11,$12,$13,$14,
+        $15,$16,$17,$18,
+        $19,$20,$21,
+        $22,$23,
+        $24,$25,
+        $26,$27,$28,$29,$30,$31,$32,
+        $33,$34,$35,$36,$37,$38,$39
+      ) RETURNING *`,
+      [
+        ref, user.id, body.name, body.persal, body.dept||'', body.contact||'', body.phone||'',
+        body.purpose, body.logsheet||'',
+        body.dateFrom||null, body.dateTo||null,
+        body.vehicleType||'', body.engineIdx||'', body.kmBracket||'',
+        body.vehicleCategory||'A', body.fuelType||'petrol', body.engineBand||'', body.weightBand||'',
+        parseFloat(body.tariffRate)||0, body.persalRef||'', body.reimbursementScheme||'private',
+        isLate, body.lateSubmissionReason||'',
+        !!body.duplicateException, body.duplicateExceptionNote||'',
+        body.reg||'', body.km||0, body.amount||0,
+        isDraft ? 'draft' : 'pending',
+        JSON.stringify(body.docs||[]), JSON.stringify(body.docLinks||[]), body.advance||false,
+        body.advA||0, body.advB||0, body.advC||0,
+        JSON.stringify(body.allocAmounts||{}),
+        body.sigName||'', body.sigRank||'', body.sigDate||null,
+      ]
+    );
+    claim = rows[0];
+  } catch (err) { claimErr = err; }
 
   if (claimErr) return res.status(500).json({ error: claimErr.message });
 
   // Insert trips
   if (trips.length > 0) {
-    const { error: tripErr } = await supabase.from('trips').insert(
-      trips.map((t, i) => ({
-        claim_id:   claim.id,
-        trip_order: i,
-        date_from:  t.dateFrom || t.date || null,
-        date_to:    t.dateTo   || t.date || null,
-        origin:     t.origin   || '',
-        dest:       t.dest     || '',
-        km:         t.km       || 0,
-      }))
-    );
-    if (tripErr) return res.status(500).json({ error: tripErr.message });
+    try {
+      for (let i = 0; i < trips.length; i++) {
+        const t = trips[i];
+        await db.query(
+          `INSERT INTO trips (claim_id, trip_order, date_from, date_to, origin, dest, km)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [claim.id, i, t.dateFrom||t.date||null, t.dateTo||t.date||null, t.origin||'', t.dest||'', t.km||0]
+        );
+      }
+    } catch (err) { return res.status(500).json({ error: err.message }); }
   }
 
   // Store file attachments (base64)
   const attachments = body.attachments || [];
   if (DB_CAPS.attachments && attachments.length > 0) {
-    const attachRows = attachments
-      .filter(a => a.fileData && a.fileName)
-      .map(a => ({
-        claim_id:    claim.id,
-        field_key:   a.fieldKey   || 'general',
-        file_name:   a.fileName,
-        file_data:   a.fileData,
-        mime_type:   a.mimeType   || 'application/octet-stream',
-        file_size:   a.fileSize   || 0,
-        uploaded_by: user.id,
-      }));
-    if (attachRows.length > 0) {
-      await supabase.from('claim_attachments').insert(attachRows);
+    for (const a of attachments.filter(a => a.fileData && a.fileName)) {
+      await db.query(
+        `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [claim.id, a.fieldKey||'general', a.fileName, a.fileData, a.mimeType||'application/octet-stream', a.fileSize||0, user.id]
+      );
     }
   }
 
   // Re-fetch with trips + attachments
-  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
-  const { data: claimWithTrips } = await supabase
-    .from('claims')
-    .select(`*, trips(*)${attachSel}`)
-    .eq('id', claim.id)
-    .single();
+  const claimWithTrips = await getClaimFull('id', claim.id);
 
-  await supabase.from('claim_status_history').insert({
-    claim_id:    claim.id,
-    from_status: null,
-    to_status:   isDraft ? 'draft' : 'pending',
-    changed_by:  user.id,
-    note:        isDraft ? 'Draft saved' : 'Claim submitted',
-  });
+  await db.query(
+    `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [claim.id, null, isDraft ? 'draft' : 'pending', user.id, isDraft ? 'Draft saved' : 'Claim submitted']
+  );
 
   if (!isDraft) {
     const claimSummary = buildClaimSummaryHtml(ref, body.name, body.dept, body.purpose, body.amount);
@@ -474,15 +502,16 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
     effectiveRole = matchedRole;
   }
 
-  const userSel = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
-  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
-  const { data: existing, error: fetchErr } = await supabase
-    .from('claims')
-    .select(`id, status, name, persal, dept, purpose, amount, user_id, ${userSel}`)
-    .eq('ref', ref)
-    .single();
-
-  if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
+  const userEmailJoin = DB_CAPS.userEmail
+    ? 'LEFT JOIN users u ON u.id = c.user_id'
+    : '';
+  const userEmailSel = DB_CAPS.userEmail ? ', u.name AS owner_name, u.email AS owner_email' : '';
+  const { rows: [existing] } = await db.query(
+    `SELECT c.id, c.status, c.name, c.persal, c.dept, c.purpose, c.amount, c.user_id ${userEmailSel}
+     FROM claims c ${userEmailJoin} WHERE c.ref=$1`,
+    [ref]
+  );
+  if (!existing) return res.status(404).json({ error: 'Claim not found' });
 
   // Validate from-status
   if (status === 'rejected') {
@@ -506,25 +535,17 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
     });
   }
 
-  const { data: updated, error } = await supabase
-    .from('claims')
-    .update({ status })
-    .eq('ref', ref)
-    .select(`*, trips(*)${attachSel}`)
-    .single();
+  await db.query('UPDATE claims SET status=$1 WHERE ref=$2', [status, ref]);
+  const updated = await getClaimFull('ref', ref);
+  if (!updated) return res.status(500).json({ error: 'Claim update failed' });
 
-  if (error) return res.status(500).json({ error: error.message });
+  await db.query(
+    `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [existing.id, existing.status, status, user.id, note||'', DB_CAPS.infoMessage && note ? note : null]
+  );
 
-  await supabase.from('claim_status_history').insert({
-    claim_id:    existing.id,
-    from_status: existing.status,
-    to_status:   status,
-    changed_by:  user.id,
-    note:        note || '',
-    ...(DB_CAPS.infoMessage && note ? { info_message: note } : {}),
-  });
-
-  const officialEmail = existing.users?.email;
+  const officialEmail = existing.owner_email;
   const claimSummaryHtml = buildClaimSummaryHtml(ref, existing.name, existing.dept, existing.purpose, existing.amount);
 
   // Notifications per status
@@ -627,44 +648,39 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
   const { message } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
 
-  const userSel = DB_CAPS.userEmail ? 'users(name, email)' : 'users(name)';
-  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
-  const { data: existing, error: fetchErr } = await supabase
-    .from('claims')
-    .select(`id, status, name, purpose, amount, user_id, ${userSel}`)
-    .eq('ref', ref)
-    .single();
+  const emailJoin = DB_CAPS.userEmail ? 'LEFT JOIN users u ON u.id = c.user_id' : '';
+  const emailSel  = DB_CAPS.userEmail ? ', u.email AS owner_email' : '';
+  const { rows: [existing] } = await db.query(
+    `SELECT c.id, c.status, c.name, c.purpose, c.amount, c.user_id ${emailSel}
+     FROM claims c ${emailJoin} WHERE c.ref=$1`,
+    [ref]
+  );
 
-  if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
+  if (!existing) return res.status(404).json({ error: 'Claim not found' });
   if (existing.status !== route.requiredStatus) {
     return res.status(400).json({ error: `Claim must be in '${route.requiredStatus}' status` });
   }
 
-  const claimUpdates = {
-    status: 'info_requested',
-    ...(DB_CAPS.feedbackMeta ? {
-      feedback_recipient_role: route.recipientRole,
-      feedback_return_status:  route.returnStatus,
-    } : {}),
-  };
+  if (DB_CAPS.feedbackMeta) {
+    await db.query(
+      `UPDATE claims SET status='info_requested', feedback_recipient_role=$1, feedback_return_status=$2 WHERE ref=$3`,
+      [route.recipientRole, route.returnStatus, ref]
+    );
+  } else {
+    await db.query(`UPDATE claims SET status='info_requested' WHERE ref=$1`, [ref]);
+  }
+  const updated = await getClaimFull('ref', ref);
 
-  const { data: updated, error } = await supabase
-    .from('claims').update(claimUpdates).eq('ref', ref)
-    .select(`*, trips(*)${attachSel}`).single();
+  await db.query(
+    `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [existing.id, route.requiredStatus, 'info_requested', req.user.id, message, DB_CAPS.infoMessage ? message : null]
+  );
 
-  if (error) return res.status(500).json({ error: error.message });
-
-  await supabase.from('claim_status_history').insert({
-    claim_id: existing.id, from_status: route.requiredStatus, to_status: 'info_requested',
-    changed_by: req.user.id, note: message,
-    ...(DB_CAPS.infoMessage ? { info_message: message } : {}),
-  });
-
-  // Notify recipient (official = claim owner, otherwise notify all users with that role)
   const ROLE_LABELS = { official: 'Official', compiler: 'Compiler', verifier: 'Verifier', approver: 'HR Approver', hrs: 'HRS' };
   let recipientEmails = [];
   if (route.recipientRole === 'official') {
-    if (existing.users?.email) recipientEmails = [existing.users.email];
+    if (existing.owner_email) recipientEmails = [existing.owner_email];
   } else {
     recipientEmails = await getEmailsByRole(route.recipientRole);
   }
@@ -690,19 +706,17 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   const { ref } = req.params;
   const { message, attachments: newAttachments } = req.body;
 
-  const attachSel = DB_CAPS.attachments ? ', claim_attachments(id,field_key,file_name,mime_type,file_size,created_at)' : '';
-  const { data: existing, error: fetchErr } = await supabase
-    .from('claims')
-    .select(`id, status, name, purpose, persal, feedback_recipient_role, feedback_return_status`)
-    .eq('ref', ref)
-    .single();
+  const { rows: [existing] } = await db.query(
+    `SELECT id, status, name, purpose, persal, feedback_recipient_role, feedback_return_status
+     FROM claims WHERE ref=$1`,
+    [ref]
+  );
 
-  if (fetchErr || !existing) return res.status(404).json({ error: 'Claim not found' });
+  if (!existing) return res.status(404).json({ error: 'Claim not found' });
   if (existing.status !== 'info_requested') {
     return res.status(400).json({ error: 'Claim is not in info_requested state' });
   }
 
-  // Authorisation: officials are matched by persal; all other recipients by role
   const recipientRole = existing.feedback_recipient_role || 'official';
   if (recipientRole === 'official') {
     if (existing.persal !== req.user.persal) return res.status(403).json({ error: 'Forbidden' });
@@ -714,35 +728,34 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   }
 
   const returnStatus = existing.feedback_return_status || 'hr_approved';
-  const updates = {
-    status: returnStatus,
-    ...(DB_CAPS.feedbackMeta ? { feedback_recipient_role: null, feedback_return_status: null } : {}),
-  };
+  if (DB_CAPS.feedbackMeta) {
+    await db.query(
+      `UPDATE claims SET status=$1, feedback_recipient_role=NULL, feedback_return_status=NULL WHERE ref=$2`,
+      [returnStatus, ref]
+    );
+  } else {
+    await db.query(`UPDATE claims SET status=$1 WHERE ref=$2`, [returnStatus, ref]);
+  }
+  const updated = await getClaimFull('ref', ref);
 
-  const { data: updated, error } = await supabase
-    .from('claims').update(updates).eq('ref', ref)
-    .select(`*, trips(*)${attachSel}`).single();
-
-  if (error) return res.status(500).json({ error: error.message });
-
-  // Store any new attachments
   if (DB_CAPS.attachments && (newAttachments || []).length > 0) {
-    const rows = newAttachments.filter(a => a.fileData && a.fileName).map(a => ({
-      claim_id: existing.id, field_key: a.fieldKey || 'feedback-response',
-      file_name: a.fileName, file_data: a.fileData,
-      mime_type: a.mimeType || 'application/octet-stream',
-      file_size: a.fileSize || 0, uploaded_by: req.user.id,
-    }));
-    if (rows.length > 0) await supabase.from('claim_attachments').insert(rows);
+    for (const a of newAttachments.filter(a => a.fileData && a.fileName)) {
+      await db.query(
+        `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [existing.id, a.fieldKey || 'feedback-response', a.fileName, a.fileData,
+         a.mimeType || 'application/octet-stream', a.fileSize || 0, req.user.id]
+      );
+    }
   }
 
-  await supabase.from('claim_status_history').insert({
-    claim_id: existing.id, from_status: 'info_requested', to_status: returnStatus,
-    changed_by: req.user.id, note: message || 'Response provided',
-    ...(DB_CAPS.infoMessage ? { info_message: message || '' } : {}),
-  });
+  await db.query(
+    `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [existing.id, 'info_requested', returnStatus, req.user.id,
+     message || 'Response provided', DB_CAPS.infoMessage ? (message || '') : null]
+  );
 
-  // Notify the stage that is now responsible for this claim
   const STAGE_ROLES = {
     pending:     ['supervisor'],
     approved:    ['compiler'],
@@ -770,10 +783,11 @@ app.get('/api/claims/:ref/attachments/:attachmentId', requireAuth, async (req, r
   if (!DB_CAPS.attachments) return res.status(404).json({ error: 'Attachments not enabled' });
 
   const { attachmentId } = req.params;
-  const { data: attach, error } = await supabase
-    .from('claim_attachments').select('*').eq('id', attachmentId).single();
+  const { rows: [attach] } = await db.query(
+    `SELECT * FROM claim_attachments WHERE id=$1`, [attachmentId]
+  );
 
-  if (error || !attach) return res.status(404).json({ error: 'Attachment not found' });
+  if (!attach) return res.status(404).json({ error: 'Attachment not found' });
 
   const buffer = Buffer.from(attach.file_data, 'base64');
   res.set('Content-Type', attach.mime_type);
@@ -786,13 +800,18 @@ app.get('/api/claims/:ref/attachments/:attachmentId', requireAuth, async (req, r
 app.get('/api/tariff-schedules', requireAuth, async (req, res) => {
   if (!DB_CAPS.tariffSchedules) return res.json([]);
 
-  const { data, error } = await supabase
-    .from('tariff_schedules')
-    .select('*, tariff_rates(*)')
-    .order('effective_date', { ascending: false });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const { rows: schedules } = await db.query(
+      `SELECT * FROM tariff_schedules ORDER BY effective_date DESC`
+    );
+    const scheduleIds = schedules.map(s => s.id);
+    const { rows: rates } = scheduleIds.length > 0
+      ? await db.query(`SELECT * FROM tariff_rates WHERE schedule_id = ANY($1::uuid[])`, [scheduleIds])
+      : { rows: [] };
+    const ratesBySchedule = {};
+    rates.forEach(r => { (ratesBySchedule[r.schedule_id] ||= []).push(r); });
+    res.json(schedules.map(s => ({ ...s, tariff_rates: ratesBySchedule[s.id] || [] })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
@@ -802,55 +821,60 @@ app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
   const { circularRef, effectiveDate, notes, rates } = req.body;
   if (!circularRef || !effectiveDate) return res.status(400).json({ error: 'circularRef and effectiveDate required' });
 
-  const { data: schedule, error: sErr } = await supabase
-    .from('tariff_schedules')
-    .insert({ circular_ref: circularRef, effective_date: effectiveDate, notes: notes || '', created_by: req.user.id })
-    .select().single();
-
-  if (sErr) return res.status(500).json({ error: sErr.message });
-
-  if (rates && rates.length > 0) {
-    await supabase.from('tariff_rates').insert(
-      rates.map(r => ({
-        schedule_id: schedule.id,
-        category:    r.category,
-        fuel_type:   r.fuelType   || 'petrol',
-        band:        r.band,
-        scheme:      r.scheme     || 'private',
-        rate_rand:   parseFloat(r.rateRand) || 0,
-        persal_ref:  r.persalRef  || '',
-      }))
+  try {
+    const { rows: [schedule] } = await db.query(
+      `INSERT INTO tariff_schedules (circular_ref, effective_date, notes, created_by)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [circularRef, effectiveDate, notes || '', req.user.id]
     );
-  }
 
-  const { data: full } = await supabase
-    .from('tariff_schedules').select('*, tariff_rates(*)').eq('id', schedule.id).single();
+    let insertedRates = [];
+    if (rates && rates.length > 0) {
+      for (const r of rates) {
+        const { rows: [rate] } = await db.query(
+          `INSERT INTO tariff_rates (schedule_id, category, fuel_type, band, scheme, rate_rand, persal_ref)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [schedule.id, r.category, r.fuelType || 'petrol', r.band,
+           r.scheme || 'private', parseFloat(r.rateRand) || 0, r.persalRef || '']
+        );
+        insertedRates.push(rate);
+      }
+    }
 
-  res.status(201).json(full);
+    res.status(201).json({ ...schedule, tariff_rates: insertedRates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/tariff-schedules/:id', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const { error } = await supabase.from('tariff_schedules').delete().eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ ok: true });
+  try {
+    await db.query(`DELETE FROM tariff_schedules WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Claim history ─────────────────────────────────────────────────────────────
 
 app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
-  const { data: claim } = await supabase.from('claims').select('id').eq('ref', req.params.ref).single();
+  const { rows: [claim] } = await db.query(`SELECT id FROM claims WHERE ref=$1`, [req.params.ref]);
   if (!claim) return res.status(404).json({ error: 'Claim not found' });
 
-  const sel = `id, from_status, to_status, note${DB_CAPS.infoMessage ? ', info_message' : ''}, created_at, users(name, role)`;
-  const { data, error } = await supabase
-    .from('claim_status_history')
-    .select(sel)
-    .eq('claim_id', claim.id)
-    .order('created_at', { ascending: true });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
+    const { rows } = await db.query(
+      `SELECT h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
+              u.name AS user_name, u.role AS user_role
+       FROM claim_status_history h
+       LEFT JOIN users u ON u.id = h.changed_by
+       WHERE h.claim_id=$1
+       ORDER BY h.created_at ASC`,
+      [claim.id]
+    );
+    res.json(rows.map(r => ({
+      ...r,
+      users: { name: r.user_name, role: r.user_role },
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── SLA targets ───────────────────────────────────────────────────────────────
@@ -866,9 +890,10 @@ app.get('/api/sla-targets', requireAuth, async (req, res) => {
       { status: 'hr_approved', working_days: 5, label: 'HRS payment processing' },
     ]);
   }
-  const { data, error } = await supabase.from('sla_targets').select('*');
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const { rows } = await db.query(`SELECT * FROM sla_targets ORDER BY status`);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
@@ -876,31 +901,39 @@ app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
   if (!DB_CAPS.slaTargets) return res.status(503).json({ error: 'SLA targets not available' });
   const { working_days } = req.body;
   if (!working_days || working_days < 1) return res.status(400).json({ error: 'working_days must be >= 1' });
-  const { data, error } = await supabase
-    .from('sla_targets')
-    .update({ working_days })
-    .eq('status', req.params.status)
-    .select().single();
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const { rows: [updated] } = await db.query(
+      `UPDATE sla_targets SET working_days=$1 WHERE status=$2 RETURNING *`,
+      [working_days, req.params.status]
+    );
+    if (!updated) return res.status(404).json({ error: 'SLA target not found' });
+    res.json(updated);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Delegations ───────────────────────────────────────────────────────────────
 
 app.get('/api/delegations', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.json([]);
-  const { id } = req.user;
-  const { data, error } = await supabase
-    .from('delegations')
-    .select(`
-      id, role, start_date, end_date, reason, active, created_at,
-      delegator:delegator_id(id, name, persal, role),
-      delegate:delegate_id(id, name, persal, role)
-    `)
-    .or(`delegator_id.eq.${id},delegate_id.eq.${id}`)
-    .order('created_at', { ascending: false });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const { rows } = await db.query(
+      `SELECT d.id, d.role, d.start_date, d.end_date, d.reason, d.active, d.created_at,
+              tor.id AS delegator_id, tor.name AS delegator_name, tor.persal AS delegator_persal, tor.role AS delegator_role,
+              tee.id AS delegate_id,  tee.name AS delegate_name,  tee.persal AS delegate_persal,  tee.role AS delegate_role
+       FROM delegations d
+       JOIN users tor ON tor.id = d.delegator_id
+       JOIN users tee ON tee.id = d.delegate_id
+       WHERE d.delegator_id=$1 OR d.delegate_id=$1
+       ORDER BY d.created_at DESC`,
+      [req.user.id]
+    );
+    res.json(rows.map(r => ({
+      id: r.id, role: r.role, start_date: r.start_date, end_date: r.end_date,
+      reason: r.reason, active: r.active, created_at: r.created_at,
+      delegator: { id: r.delegator_id, name: r.delegator_name, persal: r.delegator_persal, role: r.delegator_role },
+      delegate:  { id: r.delegate_id,  name: r.delegate_name,  persal: r.delegate_persal,  role: r.delegate_role  },
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/delegations', requireAuth, async (req, res) => {
@@ -922,86 +955,100 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'End date must be on or after start date' });
   }
 
-  const { data, error } = await supabase
-    .from('delegations')
-    .insert({
-      delegator_id: user.id,
-      delegate_id:  delegateId,
-      role,
-      start_date:   startDate,
-      end_date:     endDate,
-      reason:       reason || '',
-      active:       true,
-    })
-    .select(`
-      id, role, start_date, end_date, reason, active, created_at,
-      delegator:delegator_id(id, name, persal, role),
-      delegate:delegate_id(id, name, persal, role)
-    `)
-    .single();
+  try {
+    const { rows: [del] } = await db.query(
+      `INSERT INTO delegations (delegator_id, delegate_id, role, start_date, end_date, reason, active)
+       VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING *`,
+      [user.id, delegateId, role, startDate, endDate, reason || '']
+    );
 
-  if (error) return res.status(500).json({ error: error.message });
+    // Fetch joined view to return same shape as GET
+    const { rows: [full] } = await db.query(
+      `SELECT d.id, d.role, d.start_date, d.end_date, d.reason, d.active, d.created_at,
+              tor.id AS delegator_id, tor.name AS delegator_name, tor.persal AS delegator_persal, tor.role AS delegator_role,
+              tee.id AS delegate_id,  tee.name AS delegate_name,  tee.persal AS delegate_persal,  tee.role AS delegate_role
+       FROM delegations d
+       JOIN users tor ON tor.id = d.delegator_id
+       JOIN users tee ON tee.id = d.delegate_id
+       WHERE d.id=$1`,
+      [del.id]
+    );
 
-  // Notify the delegate
-  if (DB_CAPS.userEmail) {
-    const { data: delegateUser } = await supabase.from('users').select('email').eq('id', delegateId).single();
-    if (delegateUser?.email) {
-      sendEmail({
-        to: delegateUser.email,
-        subject: `[GPG Claims] Delegation of authority — ${role}`,
-        html: emailTemplate('You have been delegated approval authority',
-          `<p><strong>${user.name}</strong> has delegated their <strong>${role}</strong> approval authority to you.</p>
-           <table style="width:100%;font-size:14px;border-collapse:collapse">
-             <tr><td style="padding:5px 0;color:#666;width:120px">Role delegated</td><td style="padding:5px 0;font-weight:bold">${role}</td></tr>
-             <tr><td style="padding:5px 0;color:#666">From</td><td style="padding:5px 0">${startDate}</td></tr>
-             <tr><td style="padding:5px 0;color:#666">To</td><td style="padding:5px 0">${endDate}</td></tr>
-             ${reason ? `<tr><td style="padding:5px 0;color:#666">Reason</td><td style="padding:5px 0">${reason}</td></tr>` : ''}
-           </table>
-           <p style="margin-top:16px">Log in to the GPG Travel Claims system to act on claims in this capacity.</p>`),
-      });
+    if (DB_CAPS.userEmail) {
+      const { rows: [delegateUser] } = await db.query(`SELECT email FROM users WHERE id=$1`, [delegateId]);
+      if (delegateUser?.email) {
+        sendEmail({
+          to: delegateUser.email,
+          subject: `[GPG Claims] Delegation of authority — ${role}`,
+          html: emailTemplate('You have been delegated approval authority',
+            `<p><strong>${user.name}</strong> has delegated their <strong>${role}</strong> approval authority to you.</p>
+             <table style="width:100%;font-size:14px;border-collapse:collapse">
+               <tr><td style="padding:5px 0;color:#666;width:120px">Role delegated</td><td style="padding:5px 0;font-weight:bold">${role}</td></tr>
+               <tr><td style="padding:5px 0;color:#666">From</td><td style="padding:5px 0">${startDate}</td></tr>
+               <tr><td style="padding:5px 0;color:#666">To</td><td style="padding:5px 0">${endDate}</td></tr>
+               ${reason ? `<tr><td style="padding:5px 0;color:#666">Reason</td><td style="padding:5px 0">${reason}</td></tr>` : ''}
+             </table>
+             <p style="margin-top:16px">Log in to the GPG Travel Claims system to act on claims in this capacity.</p>`),
+        });
+      }
     }
-  }
 
-  res.status(201).json(data);
+    res.status(201).json(full ? {
+      id: full.id, role: full.role, start_date: full.start_date, end_date: full.end_date,
+      reason: full.reason, active: full.active, created_at: full.created_at,
+      delegator: { id: full.delegator_id, name: full.delegator_name, persal: full.delegator_persal, role: full.delegator_role },
+      delegate:  { id: full.delegate_id,  name: full.delegate_name,  persal: full.delegate_persal,  role: full.delegate_role  },
+    } : del);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.delete('/api/delegations/:id', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
-  // Deactivate (not hard delete) — only the delegator can revoke
-  const { data: existing } = await supabase
-    .from('delegations').select('delegator_id').eq('id', req.params.id).single();
-  if (!existing) return res.status(404).json({ error: 'Delegation not found' });
-  if (existing.delegator_id !== req.user.id && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Only the delegator can revoke a delegation' });
-  }
-  const { error } = await supabase
-    .from('delegations').update({ active: false }).eq('id', req.params.id);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ ok: true });
+  try {
+    const { rows: [existing] } = await db.query(
+      `SELECT delegator_id FROM delegations WHERE id=$1`, [req.params.id]
+    );
+    if (!existing) return res.status(404).json({ error: 'Delegation not found' });
+    if (existing.delegator_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only the delegator can revoke a delegation' });
+    }
+    await db.query(`UPDATE delegations SET active=false WHERE id=$1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/users', requireAuth, async (req, res) => {
-  // Returns users that can receive a delegation (same or adjacent roles, excluding self)
-  const { data, error } = await supabase
-    .from('users')
-    .select('id, name, persal, role, dept')
-    .neq('id', req.user.id)
-    .order('name');
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data || []);
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, persal, role, dept FROM users WHERE id<>$1 ORDER BY name`,
+      [req.user.id]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Audit log (admin only) ────────────────────────────────────────────────────
 
 app.get('/api/audit', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const sel = `id, from_status, to_status, note${DB_CAPS.infoMessage ? ', info_message' : ''}, created_at, users(name, role), claims(ref, name, persal, dept)`;
-  const { data, error } = await supabase
-    .from('claim_status_history').select(sel)
-    .order('created_at', { ascending: false }).limit(500);
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+  try {
+    const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
+    const { rows } = await db.query(
+      `SELECT h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
+              u.name AS user_name, u.role AS user_role,
+              c.ref AS claim_ref, c.name AS claim_name, c.persal AS claim_persal, c.dept AS claim_dept
+       FROM claim_status_history h
+       LEFT JOIN users u  ON u.id  = h.changed_by
+       LEFT JOIN claims c ON c.id  = h.claim_id
+       ORDER BY h.created_at DESC
+       LIMIT 500`
+    );
+    res.json(rows.map(r => ({
+      ...r,
+      users:  { name: r.user_name,  role: r.user_role },
+      claims: { ref: r.claim_ref, name: r.claim_name, persal: r.claim_persal, dept: r.claim_dept },
+    })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1028,40 +1075,30 @@ if (isProd) {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function ensureUsersSeeded() {
-  const { count } = await supabase
-    .from('users').select('*', { count: 'exact', head: true });
-
-  if (count && count > 0) return;
+  const { rows: [{ count }] } = await db.query(`SELECT COUNT(*) FROM users`);
+  if (parseInt(count) > 0) return;
 
   const DEMO = [
-    { username: 'dlamini', password: 'pass123',  name: 'T. Dlamini', persal: '20482345', dept: 'GPG — Health',       role: 'official'  },
-    { username: 'khumalo', password: 'pass123',  name: 'N. Khumalo', persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor' },
-    { username: 'mokoena', password: 'pass123',  name: 'P. Mokoena', persal: '20481222', dept: 'GPG — Internal HR',  role: 'compiler'  },
-    { username: 'nkosi',   password: 'pass123',  name: 'L. Nkosi',   persal: '20481333', dept: 'GPG — Internal HR',  role: 'verifier'  },
-    { username: 'dube',    password: 'pass123',  name: 'S. Dube',    persal: '20481444', dept: 'GPG — Internal HR',  role: 'approver'  },
-    { username: 'sithole', password: 'pass123',  name: 'B. Sithole', persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs'       },
-    { username: 'admin',   password: 'admin123', name: 'Admin User', persal: '',         dept: 'GPG — System Admin', role: 'admin'     },
+    { username: 'dlamini', password: 'pass123',  name: 'T. Dlamini', persal: '20482345', dept: 'GPG — Health',       role: 'official',  email: 'official@gpg-demo.gov.za'   },
+    { username: 'khumalo', password: 'pass123',  name: 'N. Khumalo', persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor',email: 'supervisor@gpg-demo.gov.za'  },
+    { username: 'mokoena', password: 'pass123',  name: 'P. Mokoena', persal: '20481222', dept: 'GPG — Internal HR',  role: 'compiler',  email: 'compiler@gpg-demo.gov.za'    },
+    { username: 'nkosi',   password: 'pass123',  name: 'L. Nkosi',   persal: '20481333', dept: 'GPG — Internal HR',  role: 'verifier',  email: 'verifier@gpg-demo.gov.za'    },
+    { username: 'dube',    password: 'pass123',  name: 'S. Dube',    persal: '20481444', dept: 'GPG — Internal HR',  role: 'approver',  email: 'approver@gpg-demo.gov.za'    },
+    { username: 'sithole', password: 'pass123',  name: 'B. Sithole', persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs',       email: 'internalhr@gpg-demo.gov.za'  },
+    { username: 'admin',   password: 'admin123', name: 'Admin User', persal: '',         dept: 'GPG — System Admin', role: 'admin',     email: 'admin@gpg-demo.gov.za'       },
   ];
 
-  const { error } = await supabase.from('users').insert(DEMO);
-  if (error) {
-    console.error('Failed to seed users:', error.message);
-    return;
-  }
-  console.log('Demo users seeded.');
-  if (DB_CAPS.userEmail) {
-    const emails = [
-      { username: 'dlamini', email: 'official@gpg-demo.gov.za'   },
-      { username: 'khumalo', email: 'supervisor@gpg-demo.gov.za'  },
-      { username: 'mokoena', email: 'compiler@gpg-demo.gov.za'    },
-      { username: 'nkosi',   email: 'verifier@gpg-demo.gov.za'    },
-      { username: 'dube',    email: 'approver@gpg-demo.gov.za'    },
-      { username: 'sithole', email: 'internalhr@gpg-demo.gov.za'  },
-      { username: 'admin',   email: 'admin@gpg-demo.gov.za'       },
-    ];
-    for (const { username, email } of emails) {
-      await supabase.from('users').update({ email }).eq('username', username);
+  try {
+    for (const u of DEMO) {
+      await db.query(
+        `INSERT INTO users (username, password, name, persal, dept, role, email)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (username) DO NOTHING`,
+        [u.username, u.password, u.name, u.persal, u.dept, u.role, DB_CAPS.userEmail ? u.email : null]
+      );
     }
+    console.log('Demo users seeded.');
+  } catch (err) {
+    console.error('Failed to seed users:', err.message);
   }
 }
 
