@@ -66,4 +66,4 @@ jobs:
           app-name: 'TravelClaimsSystem-PreProd'
           slot-name: 'Production'
           package: release.zip
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_7A28D3AC90134D279208868545F24703 }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5D54F841B5C845A282FBCC060EFCCA4D }}
