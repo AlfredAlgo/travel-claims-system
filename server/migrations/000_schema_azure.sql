@@ -231,3 +231,17 @@ ON CONFLICT (status) DO NOTHING;
 INSERT INTO tariff_schedules (circular_ref, effective_date, notes)
 VALUES ('T118', '2026-08-01', 'DoT circular T118 — effective 1 August 2026')
 ON CONFLICT (circular_ref, effective_date) DO NOTHING;
+
+-- =============================================================================
+-- SEED: Demo / test user accounts
+-- Passwords are plain-text for demo purposes only — replace before go-live.
+-- =============================================================================
+INSERT INTO users (username, password, name, persal, dept, role, email) VALUES
+  ('dlamini', 'pass123',  'T. Dlamini', '20482345', 'GPG — Health',       'official',  'official@gpg-demo.gov.za'),
+  ('khumalo', 'pass123',  'N. Khumalo', '20481111', 'GPG — Finance',      'supervisor','supervisor@gpg-demo.gov.za'),
+  ('mokoena', 'pass123',  'P. Mokoena', '20481222', 'GPG — Internal HR',  'compiler',  'compiler@gpg-demo.gov.za'),
+  ('nkosi',   'pass123',  'L. Nkosi',   '20481333', 'GPG — Internal HR',  'verifier',  'verifier@gpg-demo.gov.za'),
+  ('dube',    'pass123',  'S. Dube',    '20481444', 'GPG — Internal HR',  'approver',  'approver@gpg-demo.gov.za'),
+  ('sithole', 'pass123',  'B. Sithole', '20489876', 'GPG — Internal HR',  'hrs',       'internalhr@gpg-demo.gov.za'),
+  ('admin',   'admin123', 'Admin User', '',          'GPG — System Admin', 'admin',     'admin@gpg-demo.gov.za')
+ON CONFLICT (username) DO NOTHING;
