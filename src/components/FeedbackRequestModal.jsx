@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { Btn } from './Shared';
 
-export default function FeedbackRequestModal({ claim, recipientLabel, onSubmit, onClose }) {
-  const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
+// targetOptions: [{ value: 'official', label: 'Official (claimant)' }, ...]
+export default function FeedbackRequestModal({ claim, targetOptions = [], onSubmit, onClose }) {
+  const [message,    setMessage]    = useState('');
+  const [targetRole, setTargetRole] = useState(targetOptions[0]?.value || '');
+  const [busy,       setBusy]       = useState(false);
+
+  const selectedLabel = targetOptions.find(o => o.value === targetRole)?.label || '';
 
   async function handleSubmit() {
     if (!message.trim()) return;
     setBusy(true);
     try {
-      await onSubmit(claim.ref, message.trim());
+      await onSubmit(claim.ref, message.trim(), targetRole);
       onClose();
     } catch (err) {
       alert('Error: ' + err.message);
@@ -38,13 +42,35 @@ export default function FeedbackRequestModal({ claim, recipientLabel, onSubmit, 
           <strong>{claim.ref}</strong> · {claim.name}
         </div>
 
+        {/* Target role selector */}
+        {targetOptions.length > 1 && (
+          <div style={{ marginBottom: '0.75rem' }}>
+            <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text2)', display: 'block', marginBottom: 5 }}>
+              Send request to *
+            </label>
+            <select
+              value={targetRole}
+              onChange={e => setTargetRole(e.target.value)}
+              style={{
+                width: '100%', padding: '7px 10px', fontSize: 13,
+                border: '0.5px solid var(--border2)', borderRadius: 'var(--radius)',
+                background: 'var(--bg)', color: 'var(--text)', fontFamily: 'inherit',
+              }}
+            >
+              {targetOptions.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+
         <div style={{
           padding: '10px 12px', background: 'var(--purple-bg)',
           borderRadius: 'var(--radius)', marginBottom: '1rem',
           fontSize: 12, color: 'var(--purple-text)',
         }}>
           <i className="ti ti-user-exclamation" style={{ fontSize: 14, marginRight: 6, verticalAlign: -2 }} />
-          <strong>{recipientLabel}</strong> will be notified and can respond with a message and replacement documents.
+          <strong>{selectedLabel || targetOptions[0]?.label}</strong> will be notified and can respond with a message and replacement documents.
         </div>
 
         <label style={{ fontSize: 12, fontWeight: 500, color: 'var(--text2)', display: 'block', marginBottom: 6 }}>

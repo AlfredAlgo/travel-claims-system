@@ -18,15 +18,16 @@ const ALL_NAV = [
   {
     section: 'Supervisor',
     items: [
-      { id: 'supervisor', icon: 'clipboard-check', label: 'Approve queue', roles: ['supervisor'], badge: 'sup' },
+      { id: 'supervisor',     icon: 'clipboard-check', label: 'Approve queue',    roles: ['supervisor'],     badge: 'sup'    },
+      { id: 'hrm-supervisor', icon: 'user-cog',        label: 'Allocation queue', roles: ['hrm_supervisor'], badge: 'hrmSup' },
     ],
   },
   {
     section: 'Internal HR Chain',
     items: [
-      { id: 'compiler', icon: 'stack-2',       label: 'Compiler queue',   roles: ['compiler'],  badge: 'compiler' },
-      { id: 'verifier', icon: 'shield-check',  label: 'Verifier queue',   roles: ['verifier'],  badge: 'verifier' },
-      { id: 'approver', icon: 'circle-check',  label: 'HR Approver queue',roles: ['approver'],  badge: 'approver' },
+      { id: 'compiler', icon: 'stack-2',      label: 'HR Compiler queue',  roles: ['compiler'],  badge: 'compiler' },
+      { id: 'verifier', icon: 'shield-check', label: 'HR Verifier queue',  roles: ['verifier'],  badge: 'verifier' },
+      { id: 'approver', icon: 'circle-check', label: 'HR Approver queue',  roles: ['approver'],  badge: 'approver' },
     ],
   },
   {
@@ -48,29 +49,31 @@ const ALL_NAV = [
     section: 'Settings',
     items: [
       { id: 'delegations', icon: 'users-group', label: 'Delegation of authority',
-        roles: ['supervisor','compiler','verifier','approver','hrs'] },
+        roles: ['supervisor','hrm_supervisor','compiler','verifier','approver','hrs'] },
     ],
   },
 ];
 
 const ROLE_LABELS = {
-  official:   'Official',
-  supervisor: 'Supervisor',
-  compiler:   'Compiler',
-  verifier:   'Verifier',
-  approver:   'HR Approver',
-  hrs:        'HRS',
-  admin:      'System Admin',
+  official:       'Official',
+  supervisor:     'Supervisor',
+  hrm_supervisor: 'HRM Supervisor',
+  compiler:       'HR Compiler',
+  verifier:       'HR Verifier',
+  approver:       'HR Approver',
+  hrs:            'HRS',
+  admin:          'System Admin',
 };
 
 const ROLE_COLORS = {
-  official:   { bg: 'var(--teal-bg)',   color: 'var(--teal-text)'   },
-  supervisor: { bg: 'var(--amber-bg)',  color: 'var(--amber-text)'  },
-  compiler:   { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
-  verifier:   { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
-  approver:   { bg: 'var(--green-bg)',  color: 'var(--green-text)'  },
-  hrs:        { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
-  admin:      { bg: 'var(--gray-bg)',   color: 'var(--gray-text)'   },
+  official:       { bg: 'var(--teal-bg)',   color: 'var(--teal-text)'   },
+  supervisor:     { bg: 'var(--amber-bg)',  color: 'var(--amber-text)'  },
+  hrm_supervisor: { bg: 'var(--purple-bg)', color: 'var(--purple-text)' },
+  compiler:       { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  verifier:       { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  approver:       { bg: 'var(--green-bg)',  color: 'var(--green-text)'  },
+  hrs:            { bg: 'var(--blue-bg)',   color: 'var(--blue-text)'   },
+  admin:          { bg: 'var(--gray-bg)',   color: 'var(--gray-text)'   },
 };
 
 export default function Sidebar({ active, onNav, badges, user, onLogout }) {

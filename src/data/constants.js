@@ -67,15 +67,16 @@ export const ST_CODES = [
 ];
 
 export const STATUS_META = {
-  draft:          { label: 'Draft',            cls: 'gray'   },
-  pending:        { label: 'Pending approval', cls: 'amber'  },
-  approved:       { label: 'Approved',         cls: 'green'  },
-  compiled:       { label: 'Compiled',         cls: 'blue'   },
-  verified:       { label: 'Verified',         cls: 'teal'   },
-  hr_approved:    { label: 'HR Approved',      cls: 'green'  },
-  rejected:       { label: 'Rejected',         cls: 'red'    },
-  info_requested: { label: 'Info requested',   cls: 'purple' },
-  paid:           { label: 'Paid',             cls: 'teal'   },
+  draft:          { label: 'Draft',                cls: 'gray'   },
+  pending:        { label: 'Pending approval',     cls: 'amber'  },
+  hrm_pending:    { label: 'Awaiting allocation',  cls: 'purple' },
+  approved:       { label: 'Approved',             cls: 'green'  },
+  compiled:       { label: 'Compiled',             cls: 'blue'   },
+  verified:       { label: 'Verified',             cls: 'teal'   },
+  hr_approved:    { label: 'HR Approved',          cls: 'green'  },
+  rejected:       { label: 'Rejected',             cls: 'red'    },
+  info_requested: { label: 'Info requested',       cls: 'purple' },
+  paid:           { label: 'Paid',                 cls: 'teal'   },
 };
 
 // Kept for backward-compatibility: old claims stored engineIdx + kmBracket

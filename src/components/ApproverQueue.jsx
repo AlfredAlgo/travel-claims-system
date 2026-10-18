@@ -11,6 +11,14 @@ const QC_ITEMS = [
   'Budget code / cost centre available',
 ];
 
+const FEEDBACK_TARGETS = [
+  { value: 'official',        label: 'Official (claimant)' },
+  { value: 'supervisor',      label: 'Line Manager (Supervisor)' },
+  { value: 'hrm_supervisor',  label: 'HRM Supervisor' },
+  { value: 'compiler',        label: 'HR Compiler' },
+  { value: 'verifier',        label: 'HR Verifier' },
+];
+
 export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim, onRequestFeedback }) {
   const queue = claims.filter(c => c.status === 'verified');
   const [filtered, setFiltered] = useState(queue);
@@ -131,7 +139,7 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
       {feedbackModal && (
         <FeedbackRequestModal
           claim={feedbackModal}
-          recipientLabel="Verifier"
+          targetOptions={FEEDBACK_TARGETS}
           onSubmit={onRequestFeedback}
           onClose={() => setFeedbackModal(null)}
         />

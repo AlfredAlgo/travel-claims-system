@@ -14,6 +14,13 @@ const QC_ITEMS = [
   'Duplicate exception documented (if applicable)', 'Total km vs route plausibility',
 ];
 
+const FEEDBACK_TARGETS = [
+  { value: 'official',        label: 'Official (claimant)' },
+  { value: 'supervisor',      label: 'Line Manager (Supervisor)' },
+  { value: 'hrm_supervisor',  label: 'HRM Supervisor' },
+  { value: 'compiler',        label: 'HR Compiler' },
+];
+
 export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
   const queue           = claims.filter(c => c.status === 'compiled');
   const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'verifier');
@@ -175,7 +182,7 @@ export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim,
       {feedbackModal && (
         <FeedbackRequestModal
           claim={feedbackModal}
-          recipientLabel="Compiler"
+          targetOptions={FEEDBACK_TARGETS}
           onSubmit={onRequestFeedback}
           onClose={() => setFeedbackModal(null)}
         />

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
   name       TEXT NOT NULL,
   persal     TEXT DEFAULT '',
   dept       TEXT DEFAULT '',
-  role       TEXT NOT NULL CHECK (role IN ('official','supervisor','compiler','verifier','approver','hrs','admin')),
+  role       TEXT NOT NULL CHECK (role IN ('official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin')),
   email      TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS claims (
   -- Workflow status
   status                   TEXT        NOT NULL DEFAULT 'draft'
                              CHECK (status IN (
-                               'draft','pending','approved','compiled','verified',
+                               'draft','pending','hrm_pending','approved','compiled','verified',
                                'hr_approved','rejected','info_requested','paid'
                              )),
 
@@ -219,8 +219,9 @@ CREATE TABLE IF NOT EXISTS sla_targets (
 
 INSERT INTO sla_targets (status, working_days, label) VALUES
   ('pending',     5, 'Supervisor approval'),
-  ('approved',    3, 'Compiler processing'),
-  ('compiled',    2, 'Verifier check'),
+  ('hrm_pending', 2, 'HRM Supervisor allocation'),
+  ('approved',    3, 'HR Compiler processing'),
+  ('compiled',    2, 'HR Verifier check'),
   ('verified',    2, 'HR Approver sign-off'),
   ('hr_approved', 5, 'HRS payment processing')
 ON CONFLICT (status) DO NOTHING;
@@ -237,11 +238,12 @@ ON CONFLICT (circular_ref, effective_date) DO NOTHING;
 -- Passwords are plain-text for demo purposes only — replace before go-live.
 -- =============================================================================
 INSERT INTO users (username, password, name, persal, dept, role, email) VALUES
-  ('dlamini', 'pass123',  'T. Dlamini', '20482345', 'GPG — Health',       'official',  'official@gpg-demo.gov.za'),
-  ('khumalo', 'pass123',  'N. Khumalo', '20481111', 'GPG — Finance',      'supervisor','supervisor@gpg-demo.gov.za'),
-  ('mokoena', 'pass123',  'P. Mokoena', '20481222', 'GPG — Internal HR',  'compiler',  'compiler@gpg-demo.gov.za'),
-  ('nkosi',   'pass123',  'L. Nkosi',   '20481333', 'GPG — Internal HR',  'verifier',  'verifier@gpg-demo.gov.za'),
-  ('dube',    'pass123',  'S. Dube',    '20481444', 'GPG — Internal HR',  'approver',  'approver@gpg-demo.gov.za'),
-  ('sithole', 'pass123',  'B. Sithole', '20489876', 'GPG — Internal HR',  'hrs',       'internalhr@gpg-demo.gov.za'),
-  ('admin',   'admin123', 'Admin User', '',          'GPG — System Admin', 'admin',     'admin@gpg-demo.gov.za')
+  ('dlamini',  'pass123',  'T. Dlamini',  '20482345', 'GPG — Health',       'official',       'official@gpg-demo.gov.za'),
+  ('khumalo',  'pass123',  'N. Khumalo',  '20481111', 'GPG — Finance',      'supervisor',     'supervisor@gpg-demo.gov.za'),
+  ('pieterse', 'pass123',  'R. Pieterse', '20481555', 'GPG — Internal HR',  'hrm_supervisor', 'hrmsupervisor@gpg-demo.gov.za'),
+  ('mokoena',  'pass123',  'P. Mokoena',  '20481222', 'GPG — Internal HR',  'compiler',       'compiler@gpg-demo.gov.za'),
+  ('nkosi',    'pass123',  'L. Nkosi',    '20481333', 'GPG — Internal HR',  'verifier',       'verifier@gpg-demo.gov.za'),
+  ('dube',     'pass123',  'S. Dube',     '20481444', 'GPG — Internal HR',  'approver',       'approver@gpg-demo.gov.za'),
+  ('sithole',  'pass123',  'B. Sithole',  '20489876', 'GPG — Internal HR',  'hrs',            'internalhr@gpg-demo.gov.za'),
+  ('admin',    'admin123', 'Admin User',  '',          'GPG — System Admin', 'admin',          'admin@gpg-demo.gov.za')
 ON CONFLICT (username) DO NOTHING;

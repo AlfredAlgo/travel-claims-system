@@ -464,23 +464,25 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 
 // Transition rules: which roles can set each status, and from which current status
 const TRANSITION_RULES = {
-  approved:    { roles: ['supervisor'], from: ['pending'] },
-  compiled:    { roles: ['compiler'],   from: ['approved'] },
-  verified:    { roles: ['verifier'],   from: ['compiled'] },
-  hr_approved: { roles: ['approver'],   from: ['verified'] },
-  paid:        { roles: ['hrs'],        from: ['hr_approved'] },
-  rejected:    { roles: ['supervisor','compiler','verifier','approver','hrs'], from: null },
-  info_requested: { roles: ['hrs'],     from: ['hr_approved'] },
-  pending:     { roles: ['official'],   from: ['draft'] },
+  hrm_pending: { roles: ['supervisor'],       from: ['pending']     },
+  approved:    { roles: ['hrm_supervisor'],   from: ['hrm_pending'] },
+  compiled:    { roles: ['compiler'],         from: ['approved']    },
+  verified:    { roles: ['verifier'],         from: ['compiled']    },
+  hr_approved: { roles: ['approver'],         from: ['verified']    },
+  paid:        { roles: ['hrs'],              from: ['hr_approved'] },
+  rejected:    { roles: ['supervisor','hrm_supervisor','compiler','verifier','approver','hrs'], from: null },
+  info_requested: { roles: ['supervisor','hrm_supervisor','compiler','verifier','approver','hrs'], from: null },
+  pending:     { roles: ['official'],         from: ['draft']       },
 };
 
 // For rejections: validate the actor can reject the current claim status
 const REJECTION_FROM = {
-  supervisor: ['pending'],
-  compiler:   ['approved'],
-  verifier:   ['compiled'],
-  approver:   ['verified'],
-  hrs:        ['hr_approved'],
+  supervisor:     ['pending'],
+  hrm_supervisor: ['hrm_pending'],
+  compiler:       ['approved'],
+  verifier:       ['compiled'],
+  approver:       ['verified'],
+  hrs:            ['hr_approved'],
 };
 
 app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
@@ -549,13 +551,23 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   const claimSummaryHtml = buildClaimSummaryHtml(ref, existing.name, existing.dept, existing.purpose, existing.amount);
 
   // Notifications per status
+  if (status === 'hrm_pending') {
+    const hrmEmails = await getEmailsByRole('hrm_supervisor');
+    sendEmail({
+      to: hrmEmails,
+      subject: `[GPG Claims] Claim awaiting allocation — ${ref}`,
+      html: emailTemplate('Claim ready for allocation',
+        `<p>Claim <strong>${ref}</strong> has been approved by the line manager and is awaiting allocation to the HR compiler.</p>${claimSummaryHtml}`),
+    });
+  }
+
   if (status === 'approved') {
     const compilerEmails = await getEmailsByRole('compiler');
     sendEmail({
-      to: [...(compilerEmails.length ? compilerEmails : []), officialEmail].filter(Boolean),
-      subject: `[GPG Claims] Claim approved — ${ref}`,
-      html: emailTemplate('Claim approved by supervisor',
-        `<p>Claim <strong>${ref}</strong> has been approved and is now with the Compiler queue.</p>${claimSummaryHtml}`),
+      to: compilerEmails,
+      subject: `[GPG Claims] Claim allocated — ${ref}`,
+      html: emailTemplate('Claim allocated to HR Compiler',
+        `<p>Claim <strong>${ref}</strong> has been allocated and is now in the HR Compiler queue.</p>${claimSummaryHtml}`),
     });
   }
 
@@ -581,8 +593,10 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   if (status === 'hr_approved') {
     const hrsEmails = await getEmailsByRole('hrs');
+    // Notify HRS for payment + notify compiler & verifier for visibility
+    const compilerVerifierEmails = await getEmailsByRole('compiler', 'verifier');
     sendEmail({
-      to: hrsEmails,
+      to: [...hrsEmails, ...compilerVerifierEmails].filter(Boolean),
       subject: `[GPG Claims] Claim HR-approved — ${ref}`,
       html: emailTemplate('Claim ready for payment processing',
         `<p>Claim <strong>${ref}</strong> has been HR-approved and is ready for payment processing on Persal.</p>${claimSummaryHtml}`),
@@ -596,20 +610,24 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   }
 
   if (status === 'rejected') {
-    const priorRoles = {
-      supervisor: [],
-      compiler:   ['supervisor'],
-      verifier:   ['supervisor','compiler'],
-      approver:   ['supervisor','compiler','verifier'],
-      hrs:        ['supervisor','compiler','verifier','approver'],
-    }[user.role] || [];
-
-    const priorEmails = priorRoles.length > 0 ? await getEmailsByRole(...priorRoles) : [];
+    // HRS rejection → compiler + approver only, NOT official
+    // All other rejections → official + relevant supervisors
+    const REJECTION_NOTIFY = {
+      supervisor:     { notifyOfficial: true,  extraRoles: [] },
+      hrm_supervisor: { notifyOfficial: true,  extraRoles: ['supervisor'] },
+      compiler:       { notifyOfficial: true,  extraRoles: ['supervisor'] },
+      verifier:       { notifyOfficial: true,  extraRoles: ['supervisor', 'compiler'] },
+      approver:       { notifyOfficial: true,  extraRoles: ['supervisor', 'compiler', 'verifier'] },
+      hrs:            { notifyOfficial: false, extraRoles: ['compiler', 'approver'] },
+    };
+    const notify = REJECTION_NOTIFY[effectiveRole] || { notifyOfficial: true, extraRoles: [] };
+    const extraEmails = notify.extraRoles.length > 0 ? await getEmailsByRole(...notify.extraRoles) : [];
+    const toList = [...(notify.notifyOfficial && officialEmail ? [officialEmail] : []), ...extraEmails].filter(Boolean);
     sendEmail({
-      to: [officialEmail, ...priorEmails].filter(Boolean),
+      to: toList,
       subject: `[GPG Claims] Claim rejected — ${ref}`,
       html: emailTemplate('Claim has been rejected',
-        `<p>Claim <strong>${ref}</strong> was rejected by ${user.name} (${user.role}).</p>${claimSummaryHtml}
+        `<p>Claim <strong>${ref}</strong> was rejected by ${user.name} (${effectiveRole}).</p>${claimSummaryHtml}
          <div style="margin-top:16px;padding:14px;background:#fff0f0;border-left:3px solid #e02d3c;border-radius:4px">
            <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Reason:</p>
            <p style="margin:8px 0 0;font-size:14px">${note || '—'}</p>
@@ -618,11 +636,12 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   }
 
   if (status === 'paid') {
+    const compilerApproverEmails = await getEmailsByRole('compiler', 'approver');
     sendEmail({
-      to: officialEmail,
-      subject: `[GPG Claims] Your claim has been paid — ${ref}`,
-      html: emailTemplate('Your claim has been paid',
-        `<p>Your travel claim has been processed and payment has been confirmed on Persal.</p>${claimSummaryHtml}
+      to: [officialEmail, ...compilerApproverEmails].filter(Boolean),
+      subject: `[GPG Claims] Claim paid — ${ref}`,
+      html: emailTemplate('Claim has been paid',
+        `<p>Travel claim <strong>${ref}</strong> has been processed and payment has been confirmed on Persal.</p>${claimSummaryHtml}
          <p style="margin-top:16px;color:#0F6E56;font-weight:bold">Payment processed.</p>`),
     });
   }
@@ -630,41 +649,51 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   res.json(normalizeClaim(updated));
 });
 
-// ── Info request (HRS on hr_approved claims) ──────────────────────────────────
+// ── Info request — any HR-chain role, with selectable target ─────────────────
 
 app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
-  // Each role can request changes from the previous stage actor
-  const FEEDBACK_ROUTES = {
-    supervisor: { recipientRole: 'official',  returnStatus: 'pending',     requiredStatus: 'pending'     },
-    compiler:   { recipientRole: 'official',  returnStatus: 'approved',    requiredStatus: 'approved'    },
-    verifier:   { recipientRole: 'compiler',  returnStatus: 'compiled',    requiredStatus: 'compiled'    },
-    approver:   { recipientRole: 'verifier',  returnStatus: 'verified',    requiredStatus: 'verified'    },
-    hrs:        { recipientRole: 'official',  returnStatus: 'hr_approved', requiredStatus: 'hr_approved' },
+  // queueStatus = the status that puts this claim back in the REQUESTER's queue after the target responds
+  const REQUEST_INFO_CONFIG = {
+    supervisor:     { allowedTargets: ['official'],                                                     queueStatus: 'pending'     },
+    hrm_supervisor: { allowedTargets: ['official', 'supervisor'],                                       queueStatus: 'hrm_pending' },
+    compiler:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor'],                     queueStatus: 'approved'    },
+    verifier:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler'],         queueStatus: 'compiled'    },
+    approver:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler', 'verifier'], queueStatus: 'verified' },
+    hrs:            { allowedTargets: ['compiler', 'approver'],                                         queueStatus: 'hr_approved' },
   };
-  const route = FEEDBACK_ROUTES[req.user.role];
-  if (!route) return res.status(403).json({ error: 'Forbidden' });
+
+  const config = REQUEST_INFO_CONFIG[req.user.role];
+  if (!config) return res.status(403).json({ error: 'Forbidden' });
 
   const { ref } = req.params;
-  const { message } = req.body;
+  const { message, targetRole } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
+
+  const recipientRole = targetRole && config.allowedTargets.includes(targetRole)
+    ? targetRole
+    : config.allowedTargets[0];
+
+  if (!config.allowedTargets.includes(recipientRole)) {
+    return res.status(400).json({ error: `Invalid target role for your position` });
+  }
 
   const emailJoin = DB_CAPS.userEmail ? 'LEFT JOIN users u ON u.id = c.user_id' : '';
   const emailSel  = DB_CAPS.userEmail ? ', u.email AS owner_email' : '';
   const { rows: [existing] } = await db.query(
-    `SELECT c.id, c.status, c.name, c.purpose, c.amount, c.user_id ${emailSel}
+    `SELECT c.id, c.status, c.name, c.purpose, c.amount, c.user_id, c.persal ${emailSel}
      FROM claims c ${emailJoin} WHERE c.ref=$1`,
     [ref]
   );
 
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
-  if (existing.status !== route.requiredStatus) {
-    return res.status(400).json({ error: `Claim must be in '${route.requiredStatus}' status` });
+  if (existing.status !== config.queueStatus) {
+    return res.status(400).json({ error: `Claim must be in '${config.queueStatus}' status` });
   }
 
   if (DB_CAPS.feedbackMeta) {
     await db.query(
       `UPDATE claims SET status='info_requested', feedback_recipient_role=$1, feedback_return_status=$2 WHERE ref=$3`,
-      [route.recipientRole, route.returnStatus, ref]
+      [recipientRole, config.queueStatus, ref]
     );
   } else {
     await db.query(`UPDATE claims SET status='info_requested' WHERE ref=$1`, [ref]);
@@ -674,21 +703,25 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
      VALUES ($1,$2,$3,$4,$5,$6)`,
-    [existing.id, route.requiredStatus, 'info_requested', req.user.id, message, DB_CAPS.infoMessage ? message : null]
+    [existing.id, config.queueStatus, 'info_requested', req.user.id, message, DB_CAPS.infoMessage ? message : null]
   );
 
-  const ROLE_LABELS = { official: 'Official', compiler: 'Compiler', verifier: 'Verifier', approver: 'HR Approver', hrs: 'HRS' };
+  const DISPLAY_LABELS = {
+    official: 'Official', supervisor: 'Supervisor', hrm_supervisor: 'HRM Supervisor',
+    compiler: 'HR Compiler', verifier: 'HR Verifier', approver: 'HR Approver', hrs: 'HRS',
+  };
+
   let recipientEmails = [];
-  if (route.recipientRole === 'official') {
+  if (recipientRole === 'official') {
     if (existing.owner_email) recipientEmails = [existing.owner_email];
   } else {
-    recipientEmails = await getEmailsByRole(route.recipientRole);
+    recipientEmails = await getEmailsByRole(recipientRole);
   }
   sendEmail({
     to: recipientEmails,
     subject: `[GPG Claims] Changes requested — ${ref}`,
     html: emailTemplate(`Changes requested on claim ${ref}`,
-      `<p>${ROLE_LABELS[req.user.role] || req.user.role} has requested changes to this claim before it can proceed.</p>
+      `<p>${DISPLAY_LABELS[req.user.role] || req.user.role} has requested changes to this claim before it can proceed.</p>
        <p><strong>Ref:</strong> ${ref} · <strong>Purpose:</strong> ${existing.purpose || '—'}</p>
        <div style="margin-top:16px;padding:14px;background:#f3f0ff;border-left:3px solid #534AB7;border-radius:4px">
          <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Changes requested:</p>
@@ -758,6 +791,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
 
   const STAGE_ROLES = {
     pending:     ['supervisor'],
+    hrm_pending: ['hrm_supervisor'],
     approved:    ['compiler'],
     compiled:    ['verifier'],
     verified:    ['approver'],
@@ -1079,13 +1113,14 @@ async function ensureUsersSeeded() {
   if (parseInt(count) > 0) return;
 
   const DEMO = [
-    { username: 'dlamini', password: 'pass123',  name: 'T. Dlamini', persal: '20482345', dept: 'GPG — Health',       role: 'official',  email: 'official@gpg-demo.gov.za'   },
-    { username: 'khumalo', password: 'pass123',  name: 'N. Khumalo', persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor',email: 'supervisor@gpg-demo.gov.za'  },
-    { username: 'mokoena', password: 'pass123',  name: 'P. Mokoena', persal: '20481222', dept: 'GPG — Internal HR',  role: 'compiler',  email: 'compiler@gpg-demo.gov.za'    },
-    { username: 'nkosi',   password: 'pass123',  name: 'L. Nkosi',   persal: '20481333', dept: 'GPG — Internal HR',  role: 'verifier',  email: 'verifier@gpg-demo.gov.za'    },
-    { username: 'dube',    password: 'pass123',  name: 'S. Dube',    persal: '20481444', dept: 'GPG — Internal HR',  role: 'approver',  email: 'approver@gpg-demo.gov.za'    },
-    { username: 'sithole', password: 'pass123',  name: 'B. Sithole', persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs',       email: 'internalhr@gpg-demo.gov.za'  },
-    { username: 'admin',   password: 'admin123', name: 'Admin User', persal: '',         dept: 'GPG — System Admin', role: 'admin',     email: 'admin@gpg-demo.gov.za'       },
+    { username: 'dlamini',  password: 'pass123',  name: 'T. Dlamini',  persal: '20482345', dept: 'GPG — Health',       role: 'official',       email: 'official@gpg-demo.gov.za'      },
+    { username: 'khumalo',  password: 'pass123',  name: 'N. Khumalo',  persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor',     email: 'supervisor@gpg-demo.gov.za'    },
+    { username: 'pieterse', password: 'pass123',  name: 'R. Pieterse', persal: '20481555', dept: 'GPG — Internal HR',  role: 'hrm_supervisor', email: 'hrmsupervisor@gpg-demo.gov.za' },
+    { username: 'mokoena',  password: 'pass123',  name: 'P. Mokoena',  persal: '20481222', dept: 'GPG — Internal HR',  role: 'compiler',       email: 'compiler@gpg-demo.gov.za'      },
+    { username: 'nkosi',    password: 'pass123',  name: 'L. Nkosi',    persal: '20481333', dept: 'GPG — Internal HR',  role: 'verifier',       email: 'verifier@gpg-demo.gov.za'      },
+    { username: 'dube',     password: 'pass123',  name: 'S. Dube',     persal: '20481444', dept: 'GPG — Internal HR',  role: 'approver',       email: 'approver@gpg-demo.gov.za'      },
+    { username: 'sithole',  password: 'pass123',  name: 'B. Sithole',  persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs',            email: 'internalhr@gpg-demo.gov.za'    },
+    { username: 'admin',    password: 'admin123', name: 'Admin User',  persal: '',         dept: 'GPG — System Admin', role: 'admin',          email: 'admin@gpg-demo.gov.za'         },
   ];
 
   try {

@@ -7,6 +7,7 @@ import Dashboard from './components/Dashboard';
 import NewClaim from './components/NewClaim';
 import MyClaims from './components/MyClaims';
 import SupervisorQueue from './components/SupervisorQueue';
+import HrmSupervisorQueue from './components/HrmSupervisorQueue';
 import CompilerQueue from './components/CompilerQueue';
 import VerifierQueue from './components/VerifierQueue';
 import ApproverQueue from './components/ApproverQueue';
@@ -21,13 +22,14 @@ import { Toast } from './components/Shared';
 import { api } from './utils/api';
 
 const ROLE_PAGES = {
-  official:   ['dashboard', 'new-claim', 'my-claims'],
-  supervisor: ['dashboard', 'supervisor', 'delegations'],
-  compiler:   ['dashboard', 'compiler',  'delegations'],
-  verifier:   ['dashboard', 'verifier',  'delegations'],
-  approver:   ['dashboard', 'approver',  'delegations'],
-  hrs:        ['dashboard', 'hrs',       'delegations'],
-  admin:      ['dashboard', 'tariffs', 'reports', 'audit', 'sla-targets'],
+  official:       ['dashboard', 'new-claim', 'my-claims'],
+  supervisor:     ['dashboard', 'supervisor',     'delegations'],
+  hrm_supervisor: ['dashboard', 'hrm-supervisor', 'delegations'],
+  compiler:       ['dashboard', 'compiler',       'delegations'],
+  verifier:       ['dashboard', 'verifier',       'delegations'],
+  approver:       ['dashboard', 'approver',       'delegations'],
+  hrs:            ['dashboard', 'hrs',            'delegations'],
+  admin:          ['dashboard', 'tariffs', 'reports', 'audit', 'sla-targets'],
 };
 
 function AppShell() {
@@ -66,6 +68,7 @@ function AppShell() {
   const badges = {
     my:       claims.filter(c => c.persal === user?.persal).length,
     sup:      claims.filter(c => c.status === 'pending').length,
+    hrmSup:   claims.filter(c => c.status === 'hrm_pending').length,
     compiler: claims.filter(c => c.status === 'approved').length,
     verifier: claims.filter(c => c.status === 'compiled').length,
     approver: claims.filter(c => c.status === 'verified').length,
@@ -132,8 +135,8 @@ function AppShell() {
             onViewClaim={setSelectedClaim}
             onApprove={async ref => {
               try {
-                await updateStatus(ref, 'approved');
-                toast(`${ref} approved — Compiler notified`);
+                await updateStatus(ref, 'hrm_pending');
+                toast(`${ref} approved — HRM Supervisor notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onReject={async (ref, note) => {
@@ -142,11 +145,38 @@ function AppShell() {
                 toast(`${ref} rejected — official notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestFeedback={async (ref, message) => {
+            onRequestFeedback={async (ref, message, targetRole) => {
               try {
-                const updated = await api.requestFeedback(ref, message);
+                const updated = await api.requestFeedback(ref, message, targetRole);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — changes requested from official`);
+                toast(`${ref} — changes requested`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+          />
+        );
+
+      case 'hrm-supervisor':
+        return (
+          <HrmSupervisorQueue
+            claims={claims}
+            onViewClaim={setSelectedClaim}
+            onAllocate={async ref => {
+              try {
+                await updateStatus(ref, 'approved');
+                toast(`${ref} allocated — HR Compiler notified`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onReject={async (ref, note) => {
+              try {
+                await updateStatus(ref, 'rejected', { note });
+                toast(`${ref} rejected`);
+              } catch (err) { toast('Error: ' + err.message); }
+            }}
+            onRequestFeedback={async (ref, message, targetRole) => {
+              try {
+                const updated = await api.requestFeedback(ref, message, targetRole);
+                setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
+                toast(`${ref} — changes requested`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />
@@ -160,20 +190,20 @@ function AppShell() {
             onCompile={async ref => {
               try {
                 await updateStatus(ref, 'compiled');
-                toast(`${ref} compiled — Verifier notified`);
+                toast(`${ref} compiled — HR Verifier notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onReject={async (ref, note) => {
               try {
                 await updateStatus(ref, 'rejected', { note });
-                toast(`${ref} rejected — official notified`);
+                toast(`${ref} rejected`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestFeedback={async (ref, message) => {
+            onRequestFeedback={async (ref, message, targetRole) => {
               try {
-                const updated = await api.requestFeedback(ref, message);
+                const updated = await api.requestFeedback(ref, message, targetRole);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — changes requested from official`);
+                toast(`${ref} — changes requested`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onRespondFeedback={async (ref, message, attachments) => {
@@ -200,14 +230,14 @@ function AppShell() {
             onReject={async (ref, note) => {
               try {
                 await updateStatus(ref, 'rejected', { note });
-                toast(`${ref} rejected — official notified`);
+                toast(`${ref} rejected`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestFeedback={async (ref, message) => {
+            onRequestFeedback={async (ref, message, targetRole) => {
               try {
-                const updated = await api.requestFeedback(ref, message);
+                const updated = await api.requestFeedback(ref, message, targetRole);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — changes requested from compiler`);
+                toast(`${ref} — changes requested`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
             onRespondFeedback={async (ref, message, attachments) => {
@@ -234,14 +264,14 @@ function AppShell() {
             onReject={async (ref, note) => {
               try {
                 await updateStatus(ref, 'rejected', { note });
-                toast(`${ref} rejected — official notified`);
+                toast(`${ref} rejected`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestFeedback={async (ref, message) => {
+            onRequestFeedback={async (ref, message, targetRole) => {
               try {
-                const updated = await api.requestFeedback(ref, message);
+                const updated = await api.requestFeedback(ref, message, targetRole);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
-                toast(`${ref} — changes requested from verifier`);
+                toast(`${ref} — changes requested`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />
@@ -261,15 +291,15 @@ function AppShell() {
             onReject={async (ref, note) => {
               try {
                 await updateStatus(ref, 'rejected', { note });
-                toast(`${ref} rejected — official notified`);
+                toast(`${ref} rejected — compiler & approver notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
-            onRequestFeedback={async (ref, message) => {
+            onRequestFeedback={async (ref, message, targetRole) => {
               try {
-                const updated = await api.requestFeedback(ref, message);
+                const updated = await api.requestFeedback(ref, message, targetRole);
                 setClaims(prev => prev.map(c => c.ref === ref ? updated : c));
                 setSelectedClaim(prev => prev?.ref === ref ? updated : prev);
-                toast(`${ref} — changes requested from official`);
+                toast(`${ref} — changes requested`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
           />

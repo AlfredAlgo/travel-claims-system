@@ -12,6 +12,12 @@ const QC_ITEMS = [
   'KM total verified', 'All trip legs recorded', 'Allocation codes correct',
 ];
 
+const FEEDBACK_TARGETS = [
+  { value: 'official',        label: 'Official (claimant)' },
+  { value: 'supervisor',      label: 'Line Manager (Supervisor)' },
+  { value: 'hrm_supervisor',  label: 'HRM Supervisor' },
+];
+
 export default function CompilerQueue({ claims, onCompile, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
   const queue        = claims.filter(c => c.status === 'approved');
   const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'compiler');
@@ -166,7 +172,7 @@ export default function CompilerQueue({ claims, onCompile, onReject, onViewClaim
       {feedbackModal && (
         <FeedbackRequestModal
           claim={feedbackModal}
-          recipientLabel="Official (claimant)"
+          targetOptions={FEEDBACK_TARGETS}
           onSubmit={onRequestFeedback}
           onClose={() => setFeedbackModal(null)}
         />
