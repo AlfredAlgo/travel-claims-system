@@ -34,7 +34,7 @@ function sectionLabel(doc, y, text) {
   return y + 3;
 }
 
-function signBlock(doc, x, y, w, role) {
+function signBlock(doc, x, y, w, role, sigImg, sigName, sigDate) {
   doc.setFillColor(248, 250, 252);
   doc.rect(x, y, w, 28, 'F');
   doc.setDrawColor(200, 210, 220); doc.rect(x, y, w, 28, 'S');
@@ -42,11 +42,23 @@ function signBlock(doc, x, y, w, role) {
   doc.setTextColor(...BLUE); doc.text(role, x + 2, y + 5);
   doc.setTextColor(100); doc.setFont('helvetica', 'normal'); doc.setFontSize(7);
   doc.text('Signature:', x + 2, y + 13);
-  doc.setDrawColor(160); doc.line(x + 20, y + 13, x + w - 3, y + 13);
+  if (sigImg) {
+    try { doc.addImage(sigImg, 'PNG', x + 20, y + 7, w - 23, 8); } catch {}
+  } else {
+    doc.setDrawColor(160); doc.line(x + 20, y + 13, x + w - 3, y + 13);
+  }
   doc.text('Name:', x + 2, y + 19);
-  doc.line(x + 14, y + 19, x + w - 3, y + 19);
+  if (sigName) {
+    doc.setFontSize(6.5); doc.text(String(sigName).slice(0, 24), x + 14, y + 19); doc.setFontSize(7);
+  } else {
+    doc.setDrawColor(160); doc.line(x + 14, y + 19, x + w - 3, y + 19);
+  }
   doc.text('Date:', x + 2, y + 25);
-  doc.line(x + 14, y + 25, x + w - 3, y + 25);
+  if (sigDate) {
+    doc.text(String(sigDate).slice(0, 10), x + 14, y + 25);
+  } else {
+    doc.setDrawColor(160); doc.line(x + 14, y + 25, x + w - 3, y + 25);
+  }
   doc.setTextColor(...BLACK);
 }
 
@@ -55,6 +67,8 @@ function signBlock(doc, x, y, w, role) {
 async function downloadPDF(claim, history) {
   const { default: jsPDF } = await import('jspdf');
   const { default: autoTable } = await import('jspdf-autotable');
+  let sigs = {};
+  try { sigs = await api.getSignatures(claim.ref); } catch {}
 
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const th  = { fillColor: BLUE_LIGHT, textColor: BLUE, fontStyle: 'bold', fontSize: 7.5 };
@@ -141,10 +155,15 @@ async function downloadPDF(claim, history) {
   doc.text('I certify that I was actually and necessarily employed travelling on public service during the period stated above, and that the charges are correct and in accordance with the authorised tariff.', 14, y, { maxWidth: 182 });
   doc.setFont('helvetica', 'normal'); doc.setTextColor(...BLACK);
   y += 8;
+  const supEntry = history.find(h => h.to_status === 'hrm_pending');
+  const appEntry = history.find(h => h.to_status === 'hr_approved');
   const bw = 57;
-  signBlock(doc, 14,        y, bw, 'OFFICIAL (Claimant)');
-  signBlock(doc, 14 + bw + 4, y, bw, 'SUPERVISOR / APPROVING OFFICER');
-  signBlock(doc, 14 + 2*(bw+4), y, bw, 'HRS / FINANCE AUTHORISATION');
+  signBlock(doc, 14,           y, bw, 'OFFICIAL (Claimant)',
+    sigs.sig_official, claim.sigName, claim.sigDate);
+  signBlock(doc, 14 + bw + 4,  y, bw, 'SUPERVISOR / APPROVING OFFICER',
+    sigs.sig_supervisor, supEntry?.users?.name, supEntry?.created_at?.slice(0, 10));
+  signBlock(doc, 14 + 2*(bw+4), y, bw, 'HRS / FINANCE AUTHORISATION',
+    sigs.sig_approver,  appEntry?.users?.name, appEntry?.created_at?.slice(0, 10));
 
   // ── PAGE 2 — Sheet 2 ─────────────────────────────────────────────────────
   doc.addPage();

@@ -52,6 +52,8 @@ export const api = {
   createDelegation:    (data)                                  => apiFetch('/api/delegations', { method: 'POST', body: JSON.stringify(data) }),
   revokeDelegation:    (id)                                    => apiFetch(`/api/delegations/${id}`, { method: 'DELETE' }),
   getUsers:            ()                                      => apiFetch('/api/users'),
+  saveSignature:       (ref, fieldKey, imageData)             => apiFetch(`/api/claims/${ref}/signature`, { method: 'POST', body: JSON.stringify({ fieldKey, imageData }) }),
+  getSignatures:       (ref)                                  => apiFetch(`/api/claims/${ref}/signatures`),
 };
 
 // Convert a browser File to base64

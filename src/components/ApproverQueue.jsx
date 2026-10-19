@@ -4,6 +4,8 @@ import SearchFilter from './SearchFilter';
 import RejectModal from './RejectModal';
 import SLABadge from './SLABadge';
 import FeedbackRequestModal from './FeedbackRequestModal';
+import SignatureConfirmModal from './SignatureConfirmModal';
+import { api } from '../utils/api';
 
 const QC_ITEMS = [
   'Claim verified by Verifier', 'Amount within policy limits',
@@ -25,6 +27,7 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
   const handleFilter = useCallback(r => setFiltered(r), []);
   const [rejectModal,   setRejectModal]   = useState(null);
   const [feedbackModal, setFeedbackModal] = useState(null);
+  const [sigModal,      setSigModal]      = useState(null);
   const [checks, setChecks] = useState({});
   const allChecked = QC_ITEMS.every(item => checks[item]);
   const doneCount  = QC_ITEMS.filter(item => checks[item]).length;
@@ -115,7 +118,7 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
                     </Btn>
                     <Btn variant="success" size="sm" disabled={!allChecked}
                       title={allChecked ? '' : 'Tick all final checks above before approving'}
-                      onClick={() => handleApprove(c.ref)}>
+                      onClick={() => setSigModal(c)}>
                       <i className="ti ti-circle-check" style={{ fontSize: 13 }} /> HR Approve
                     </Btn>
                     <Btn size="sm" onClick={() => setFeedbackModal(c)}
@@ -142,6 +145,21 @@ export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim
           targetOptions={FEEDBACK_TARGETS}
           onSubmit={onRequestFeedback}
           onClose={() => setFeedbackModal(null)}
+        />
+      )}
+      {sigModal && (
+        <SignatureConfirmModal
+          claim={sigModal}
+          title="HR Approve — authorisation sign-off"
+          sigLabel="HR Approver signature"
+          onConfirm={async (imageData) => {
+            if (imageData) {
+              try { await api.saveSignature(sigModal.ref, 'sig_approver', imageData); } catch {}
+            }
+            await handleApprove(sigModal.ref);
+            setSigModal(null);
+          }}
+          onClose={() => setSigModal(null)}
         />
       )}
     </div>

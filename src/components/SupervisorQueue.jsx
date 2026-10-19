@@ -2,6 +2,8 @@ import React, { useState, useCallback } from 'react';
 import { Card, Btn, PersalTag, RoleBadge } from './Shared';
 import SearchFilter from './SearchFilter';
 import FeedbackRequestModal from './FeedbackRequestModal';
+import SignatureConfirmModal from './SignatureConfirmModal';
+import { api } from '../utils/api';
 
 const QC_ITEMS = [
   'Correspondence of dates', 'Destination verified', 'KM vs approved memo',
@@ -86,12 +88,17 @@ function RejectModal({ claim, onConfirm, onClose }) {
   );
 }
 
+const SUP_FEEDBACK_TARGETS = [
+  { value: 'official', label: 'Official (claimant)' },
+];
+
 export default function SupervisorQueue({ claims, onApprove, onReject, onViewClaim, onRequestFeedback }) {
   const pending = claims.filter(c => c.status === 'pending');
   const [filtered, setFiltered] = useState(pending);
   const handleFilter = useCallback(r => setFiltered(r), []);
   const [rejectModal,   setRejectModal]   = useState(null);
   const [feedbackModal, setFeedbackModal] = useState(null);
+  const [sigModal,      setSigModal]      = useState(null);
   const [checks, setChecks] = useState({});
   const allChecked = QC_ITEMS.every(item => checks[item]);
   const doneCount  = QC_ITEMS.filter(item => checks[item]).length;
@@ -177,7 +184,7 @@ export default function SupervisorQueue({ claims, onApprove, onReject, onViewCla
                     </Btn>
                     <Btn variant="success" size="sm" disabled={!allChecked}
                       title={allChecked ? '' : 'Tick all QC checks above before approving'}
-                      onClick={() => handleApprove(c.ref)}>
+                      onClick={() => setSigModal(c)}>
                       <i className="ti ti-check" style={{ fontSize: 13 }} /> Approve
                     </Btn>
                     <Btn size="sm" onClick={() => setFeedbackModal(c)}
@@ -201,9 +208,24 @@ export default function SupervisorQueue({ claims, onApprove, onReject, onViewCla
       {feedbackModal && (
         <FeedbackRequestModal
           claim={feedbackModal}
-          recipientLabel="Official (claimant)"
+          targetOptions={SUP_FEEDBACK_TARGETS}
           onSubmit={onRequestFeedback}
           onClose={() => setFeedbackModal(null)}
+        />
+      )}
+      {sigModal && (
+        <SignatureConfirmModal
+          claim={sigModal}
+          title="Approve claim — supervisor sign-off"
+          sigLabel="Supervisor signature"
+          onConfirm={async (imageData) => {
+            if (imageData) {
+              try { await api.saveSignature(sigModal.ref, 'sig_supervisor', imageData); } catch {}
+            }
+            await handleApprove(sigModal.ref);
+            setSigModal(null);
+          }}
+          onClose={() => setSigModal(null)}
         />
       )}
     </div>

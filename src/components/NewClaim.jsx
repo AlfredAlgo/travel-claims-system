@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Card, CardTitle, Btn, FormRow, Field, SectionDivider, ActionBar, PersalTag } from './Shared';
 import { VEHICLE_CATEGORIES, FUEL_TYPES, ENGINE_BANDS, WEIGHT_BANDS_G, REIMBURSEMENT_SCHEMES, ST_CODES } from '../data/constants';
 import { buildAttachment } from '../utils/api';
+import SignaturePad from './SignaturePad';
 
 const today = new Date().toISOString().split('T')[0];
 
@@ -201,9 +202,10 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
   const [docs,       setDocs]       = useState([]);
   const [attachments, setAttachments] = useState([]); // { fieldKey, fileName, fileSize, mimeType, fileData }
   const [allocAmts,  setAllocAmts]  = useState({});
-  const [sigName,    setSigName]    = useState('');
+  const [sigName,    setSigName]    = useState(user?.name?.toUpperCase() || '');
   const [sigRank,    setSigRank]    = useState('');
   const [sigDate,    setSigDate]    = useState(today);
+  const [sigData,    setSigData]    = useState(null);
 
   // Duplicate exception
   const [dupConflict,    setDupConflict]    = useState(null); // { duplicateRef, message }
@@ -290,7 +292,16 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
       trips: sortedTrips.map(t => ({ ...t, dateFrom: t.date, dateTo: t.date })),
       km: totalKm, amount: totalClaim,
       docs, docLinks: [],
-      attachments,
+      attachments: [
+        ...attachments,
+        ...(sigData ? [{
+          fieldKey: 'sig_official',
+          fileName: 'signature_official.png',
+          fileData: sigData.replace(/^data:[^;]+;base64,/, ''),
+          mimeType: 'image/png',
+          fileSize: 0,
+        }] : []),
+      ],
       duplicateException: dupException, duplicateExceptionNote: dupExNote,
       isLateSubmission: isLate,
       lateSubmissionReason: isLate ? 'Travel date > 30 days ago' : '',
@@ -673,8 +684,16 @@ export default function NewClaim({ user, onSubmit, onSaveDraft, toast }) {
         <div style={{ fontSize: 12, color: 'var(--text2)', lineHeight: 1.7, padding: 12, background: 'var(--surface2)', borderRadius: 'var(--radius)', marginBottom: '1rem' }}>
           I certify that I was actually and necessarily employed travelling or detained on public service during the period(s) stated above, that the charges are in accordance with the authorised rate and that the incidental expenses have been actually and necessarily disbursed.
         </div>
+        <div style={{ marginBottom: '1rem' }}>
+          <SignaturePad
+            label="Draw your signature *"
+            value={sigData}
+            onChange={setSigData}
+            height={120}
+          />
+        </div>
         <FormRow cols={3}>
-          <Field label="Applicant — type full name to sign"><input value={sigName} onChange={e => setSigName(e.target.value)} placeholder="Full name" /></Field>
+          <Field label="Full name (auto-filled)"><input value={sigName} onChange={e => setSigName(e.target.value)} placeholder="Full name" /></Field>
           <Field label="Rank / grade"><input value={sigRank} onChange={e => setSigRank(e.target.value)} placeholder="e.g. D-1" /></Field>
           <Field label="Date"><input type="date" value={sigDate} onChange={e => setSigDate(e.target.value)} /></Field>
         </FormRow>

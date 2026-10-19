@@ -829,6 +829,48 @@ app.get('/api/claims/:ref/attachments/:attachmentId', requireAuth, async (req, r
   res.send(buffer);
 });
 
+// ── Save e-signature ──────────────────────────────────────────────────────────
+
+app.post('/api/claims/:ref/signature', requireAuth, async (req, res) => {
+  if (!DB_CAPS.attachments) return res.status(400).json({ error: 'Attachments not enabled' });
+  const { ref } = req.params;
+  const { fieldKey, imageData } = req.body;
+  const ALLOWED = ['sig_official', 'sig_supervisor', 'sig_approver'];
+  if (!ALLOWED.includes(fieldKey)) return res.status(400).json({ error: 'Invalid signature field' });
+  try {
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+    await db.query('DELETE FROM claim_attachments WHERE claim_id = $1 AND field_key = $2', [claim.id, fieldKey]);
+    if (imageData) {
+      const base64 = imageData.replace(/^data:[^;]+;base64,/, '');
+      await db.query(
+        `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
+         VALUES ($1,$2,$3,$4,'image/png',$5,$6)`,
+        [claim.id, fieldKey, `${fieldKey}.png`, base64, Math.round(base64.length * 0.75), req.user.id]
+      );
+    }
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Fetch signatures for PDF embedding ────────────────────────────────────────
+
+app.get('/api/claims/:ref/signatures', requireAuth, async (req, res) => {
+  if (!DB_CAPS.attachments) return res.json({});
+  const { ref } = req.params;
+  try {
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
+    if (!claim) return res.status(404).json({ error: 'Claim not found' });
+    const { rows } = await db.query(
+      `SELECT field_key, file_data, mime_type FROM claim_attachments WHERE claim_id = $1 AND field_key LIKE 'sig_%'`,
+      [claim.id]
+    );
+    const result = {};
+    rows.forEach(r => { result[r.field_key] = `data:${r.mime_type};base64,${r.file_data}`; });
+    res.json(result);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── Tariff schedule endpoints (admin) ─────────────────────────────────────────
 
 app.get('/api/tariff-schedules', requireAuth, async (req, res) => {
