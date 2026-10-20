@@ -3,23 +3,25 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 const DEMO_ACCOUNTS = [
-  { username: 'dlamini', password: 'pass123',  role: 'Official',     name: 'T. Dlamini',  dept: 'GPG — Health' },
-  { username: 'khumalo', password: 'pass123',  role: 'Supervisor',   name: 'N. Khumalo',  dept: 'GPG — Finance' },
-  { username: 'mokoena', password: 'pass123',  role: 'Compiler',     name: 'P. Mokoena',  dept: 'GPG — Internal HR' },
-  { username: 'nkosi',   password: 'pass123',  role: 'Verifier',     name: 'L. Nkosi',    dept: 'GPG — Internal HR' },
-  { username: 'dube',    password: 'pass123',  role: 'HR Approver',  name: 'S. Dube',     dept: 'GPG — Internal HR' },
-  { username: 'sithole', password: 'pass123',  role: 'HRS',          name: 'B. Sithole',  dept: 'GPG — HRS Payroll' },
-  { username: 'admin',   password: 'admin123', role: 'System Admin', name: 'Admin User',  dept: 'GPG — Admin' },
+  { username: 'dlamini',  password: 'pass123',  role: 'Official',        name: 'T. Dlamini',  dept: 'GPG — Health' },
+  { username: 'khumalo',  password: 'pass123',  role: 'Supervisor',      name: 'N. Khumalo',  dept: 'GPG — Finance' },
+  { username: 'pieterse', password: 'pass123',  role: 'HRM Supervisor',  name: 'R. Pieterse', dept: 'GPG — Internal HR' },
+  { username: 'mokoena',  password: 'pass123',  role: 'Compiler',        name: 'P. Mokoena',  dept: 'GPG — Internal HR' },
+  { username: 'nkosi',    password: 'pass123',  role: 'Verifier',        name: 'L. Nkosi',    dept: 'GPG — Internal HR' },
+  { username: 'dube',     password: 'pass123',  role: 'HR Approver',     name: 'S. Dube',     dept: 'GPG — Internal HR' },
+  { username: 'sithole',  password: 'pass123',  role: 'HRS',             name: 'B. Sithole',  dept: 'GPG — HRS Payroll' },
+  { username: 'admin',    password: 'admin123', role: 'System Admin',    name: 'Admin User',  dept: 'GPG — Admin' },
 ];
 
 const ROLE_STYLE = {
-  'Official':     { bg: '#E1F5EE', color: '#0F6E56' },
-  'Supervisor':   { bg: '#FAEEDA', color: '#854F0B' },
-  'Compiler':     { bg: '#E6F1FB', color: '#185FA5' },
-  'Verifier':     { bg: '#E6F1FB', color: '#185FA5' },
-  'HR Approver':  { bg: '#EAFAF0', color: '#3B6D11' },
-  'HRS':          { bg: '#E6F1FB', color: '#185FA5' },
-  'System Admin': { bg: '#F1EFE8', color: '#5F5E5A' },
+  'Official':        { bg: '#E1F5EE', color: '#0F6E56' },
+  'Supervisor':      { bg: '#FAEEDA', color: '#854F0B' },
+  'HRM Supervisor':  { bg: '#EDEAFF', color: '#534AB7' },
+  'Compiler':        { bg: '#E6F1FB', color: '#185FA5' },
+  'Verifier':        { bg: '#E6F1FB', color: '#185FA5' },
+  'HR Approver':     { bg: '#EAFAF0', color: '#3B6D11' },
+  'HRS':             { bg: '#E6F1FB', color: '#185FA5' },
+  'System Admin':    { bg: '#F1EFE8', color: '#5F5E5A' },
 };
 
 const GPG_BLUE   = '#175293';
@@ -119,12 +121,13 @@ export default function Login() {
             Claim workflow
           </div>
           {[
-            { step: 'Official',    action: 'Submit claim' },
-            { step: 'Supervisor',  action: 'Approve' },
-            { step: 'Compiler',    action: 'Compile & calculate' },
-            { step: 'Verifier',    action: 'Verify claim' },
-            { step: 'HR Approver', action: 'Final HR sign-off' },
-            { step: 'HRS',         action: 'Process payment' },
+            { step: 'Official',        action: 'Submit claim' },
+            { step: 'Supervisor',      action: 'Line manager approve' },
+            { step: 'HRM Supervisor',  action: 'Allocate to compiler' },
+            { step: 'Compiler',        action: 'Compile & calculate' },
+            { step: 'Verifier',        action: 'Verify claim' },
+            { step: 'HR Approver',     action: 'Final HR sign-off' },
+            { step: 'HRS',             action: 'Process payment' },
           ].map((s, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
               <div style={{
