@@ -4,10 +4,18 @@ const jwt        = require('jsonwebtoken');
 const cors       = require('cors');
 const nodemailer = require('nodemailer');
 const path       = require('path');
+const crypto     = require('crypto');
 const { Pool }   = require('pg');
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'gpg-travel-dev-secret-change-in-prod';
+
+// ── Microsoft Azure AD SSO config ─────────────────────────────────────────────
+const MS_CLIENT_ID    = process.env.AZURE_CLIENT_ID    || '';
+const MS_CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || '';
+const MS_TENANT       = process.env.AZURE_TENANT_ID    || 'common';
+const MS_REDIRECT_URI = process.env.AZURE_REDIRECT_URI || 'http://localhost:5001/api/auth/callback';
+const MS_AUTH_BASE    = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0`;
 
 // DATABASE_URL works for both Azure PostgreSQL and Supabase direct PostgreSQL.
 // Azure:    postgresql://user@host:pass@host.postgres.database.azure.com:5432/db?sslmode=require
@@ -254,6 +262,89 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 app.get('/api/auth/me', requireAuth, (req, res) => res.json(req.user));
+
+// ── Microsoft SSO — initiate ──────────────────────────────────────────────────
+
+app.get('/api/auth/microsoft', (req, res) => {
+  if (!MS_CLIENT_ID || !MS_CLIENT_SECRET) {
+    return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft SSO is not configured on this server'));
+  }
+  // Signed state JWT — no server-side storage needed, works across instances
+  const state = jwt.sign({ nonce: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '10m' });
+  const params = new URLSearchParams({
+    client_id:     MS_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri:  MS_REDIRECT_URI,
+    response_mode: 'query',
+    scope:         'openid profile email',
+    state,
+  });
+  res.redirect(`${MS_AUTH_BASE}/authorize?${params}`);
+});
+
+// ── Microsoft SSO — callback ──────────────────────────────────────────────────
+
+app.get('/api/auth/callback', async (req, res) => {
+  const { code, state, error, error_description } = req.query;
+
+  if (error) {
+    return res.redirect('/login?sso_error=' + encodeURIComponent(error_description || error));
+  }
+
+  // Verify state to prevent CSRF
+  try { jwt.verify(state, JWT_SECRET); }
+  catch { return res.redirect('/login?sso_error=' + encodeURIComponent('Invalid or expired SSO state — please try again')); }
+
+  try {
+    // Exchange code for tokens
+    const tokenRes = await fetch(`${MS_AUTH_BASE}/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id:     MS_CLIENT_ID,
+        client_secret: MS_CLIENT_SECRET,
+        code,
+        redirect_uri:  MS_REDIRECT_URI,
+        grant_type:    'authorization_code',
+      }),
+    });
+    const tokens = await tokenRes.json();
+    if (!tokenRes.ok || !tokens.id_token) {
+      return res.redirect('/login?sso_error=' + encodeURIComponent(tokens.error_description || 'Token exchange failed'));
+    }
+
+    // Decode Microsoft ID token (JWT) — no signature verification needed; the token was just issued to us
+    const msPayload = JSON.parse(Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString());
+    const msEmail = (msPayload.email || msPayload.preferred_username || '').toLowerCase();
+
+    if (!msEmail) {
+      return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft account did not return an email address'));
+    }
+
+    // Look up the user in our DB by email
+    const { rows } = await db.query(
+      'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
+      [msEmail]
+    );
+    const user = rows[0];
+
+    if (!user) {
+      return res.redirect('/login?sso_error=' + encodeURIComponent(
+        `No account found for ${msEmail} — contact your system administrator to provision access`
+      ));
+    }
+
+    // Issue our own JWT and redirect back to the SPA
+    const payload = {
+      id: user.id, name: user.name, persal: user.persal,
+      dept: user.dept, role: user.role, username: user.username, email: user.email || '',
+    };
+    const ssoToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
+    res.redirect(`/login?sso_token=${encodeURIComponent(ssoToken)}`);
+  } catch (err) {
+    res.redirect('/login?sso_error=' + encodeURIComponent('SSO failed: ' + err.message));
+  }
+});
 
 // ── Claims routes ─────────────────────────────────────────────────────────────
 

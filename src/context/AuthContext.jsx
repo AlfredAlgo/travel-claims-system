@@ -46,13 +46,21 @@ export function AuthProvider({ children }) {
     return data.user;
   }, []);
 
+  const loginWithToken = useCallback((token) => {
+    const payload = decodeToken(token);
+    if (!payload || payload.exp * 1000 < Date.now()) throw new Error('SSO token is invalid or expired');
+    localStorage.setItem('gpg_token', token);
+    setUser(payload);
+    return payload;
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem('gpg_token');
     setUser(null);
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout }}>
+    <AuthContext.Provider value={{ user, login, loginWithToken, logout }}>
       {children}
     </AuthContext.Provider>
   );

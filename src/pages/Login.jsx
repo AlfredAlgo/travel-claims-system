@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
@@ -29,13 +29,32 @@ const GPG_BLUE2  = '#0E3A6E';
 const GPG_GOLD   = '#C49018';
 
 export default function Login() {
-  const { login }   = useAuth();
-  const navigate     = useNavigate();
+  const { login, loginWithToken } = useAuth();
+  const navigate                  = useNavigate();
   const [username,  setUsername]  = useState('');
   const [password,  setPassword]  = useState('');
   const [error,     setError]     = useState('');
   const [loading,   setLoading]   = useState(false);
   const [showDemos, setShowDemos] = useState(false);
+
+  // Handle Microsoft SSO redirect-back: ?sso_token= or ?sso_error=
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const ssoToken = params.get('sso_token');
+    const ssoError = params.get('sso_error');
+    if (ssoToken) {
+      try {
+        loginWithToken(decodeURIComponent(ssoToken));
+        navigate('/', { replace: true });
+      } catch (err) {
+        setError('SSO token error: ' + err.message);
+        window.history.replaceState({}, '', '/login');
+      }
+    } else if (ssoError) {
+      setError(decodeURIComponent(ssoError));
+      window.history.replaceState({}, '', '/login');
+    }
+  }, []); // eslint-disable-line
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -235,6 +254,38 @@ export default function Login() {
                 {loading ? 'Signing in…' : 'Sign in →'}
               </button>
             </form>
+
+            {/* Divider */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '1.25rem 0' }}>
+              <div style={{ flex: 1, height: 1, background: 'rgba(0,0,0,0.10)' }} />
+              <span style={{ fontSize: 11, color: '#9a9992', fontWeight: 500, letterSpacing: '.05em', textTransform: 'uppercase' }}>or</span>
+              <div style={{ flex: 1, height: 1, background: 'rgba(0,0,0,0.10)' }} />
+            </div>
+
+            {/* Microsoft SSO */}
+            <a
+              href="/api/auth/microsoft"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+                width: '100%', padding: '9px 16px', boxSizing: 'border-box',
+                background: '#fff', border: '0.5px solid rgba(0,0,0,0.18)',
+                borderRadius: 8, fontSize: 13, fontWeight: 500, color: '#1a1a18',
+                textDecoration: 'none', cursor: 'pointer',
+                fontFamily: 'IBM Plex Sans, system-ui, sans-serif',
+                transition: 'background .15s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = '#f5f4f0'}
+              onMouseLeave={e => e.currentTarget.style.background = '#fff'}
+            >
+              {/* Microsoft logo */}
+              <svg width="18" height="18" viewBox="0 0 21 21" xmlns="http://www.w3.org/2000/svg">
+                <rect x="1" y="1" width="9" height="9" fill="#F25022" />
+                <rect x="11" y="1" width="9" height="9" fill="#7FBA00" />
+                <rect x="1" y="11" width="9" height="9" fill="#00A4EF" />
+                <rect x="11" y="11" width="9" height="9" fill="#FFB900" />
+              </svg>
+              Sign in with Microsoft
+            </a>
           </div>
 
           {/* Demo accounts toggle */}
