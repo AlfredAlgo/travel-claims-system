@@ -2,7 +2,7 @@ function getToken() {
   return localStorage.getItem('gpg_token');
 }
 
-async function apiFetch(path, options = {}) {
+export async function apiFetch(path, options = {}) {
   let res;
   try {
     res = await fetch(path, {

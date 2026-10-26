@@ -1186,11 +1186,71 @@ app.delete('/api/delegations/:id', requireAuth, async (req, res) => {
 
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
+    const cols = req.user.role === 'admin'
+      ? 'id, username, name, persal, dept, role, email, created_at'
+      : 'id, name, persal, role, dept';
     const { rows } = await db.query(
-      `SELECT id, name, persal, role, dept FROM users WHERE id<>$1 ORDER BY name`,
-      [req.user.id]
+      `SELECT ${cols} FROM users ORDER BY role, name`
     );
     res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+const VALID_ROLES = ['official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'];
+
+app.post('/api/users', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { name, email, role, persal = '', dept = '', username: uname, password: pw = '' } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
+  if (!email?.trim()) return res.status(400).json({ error: 'Email is required' });
+  if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  const username = (uname || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9._-]/g, '');
+  try {
+    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE username=$1 OR LOWER(email)=LOWER($2)', [username, email]);
+    if (existing) return res.status(409).json({ error: 'A user with that username or email already exists' });
+    const { rows: [user] } = await db.query(
+      `INSERT INTO users (username, password, name, persal, dept, role, email)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, name, persal, dept, role, email, created_at`,
+      [username, pw, name.trim(), persal.trim(), dept.trim(), role, email.trim().toLowerCase()]
+    );
+    res.status(201).json(user);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.patch('/api/users/:id', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  const { name, email, role, persal, dept, password: pw } = req.body;
+  if (role && !VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+  try {
+    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+    const { rows: [user] } = await db.query(
+      `UPDATE users SET
+        name     = COALESCE($1, name),
+        email    = COALESCE($2, email),
+        role     = COALESCE($3, role),
+        persal   = COALESCE($4, persal),
+        dept     = COALESCE($5, dept),
+        password = CASE WHEN $6 IS NOT NULL AND $6 <> '' THEN $6 ELSE password END
+       WHERE id = $7
+       RETURNING id, username, name, persal, dept, role, email, created_at`,
+      [name?.trim() || null, email?.trim().toLowerCase() || null, role || null,
+       persal?.trim() ?? null, dept?.trim() ?? null, pw || null, req.params.id]
+    );
+    res.json(user);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/users/:id', requireAuth, async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  if (String(req.params.id) === String(req.user.id)) {
+    return res.status(400).json({ error: 'Cannot delete your own account' });
+  }
+  try {
+    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1242,9 +1302,6 @@ if (isProd) {
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function ensureUsersSeeded() {
-  const { rows: [{ count }] } = await db.query(`SELECT COUNT(*) FROM users`);
-  if (parseInt(count) > 0) return;
-
   const DEMO = [
     { username: 'dlamini',  password: 'pass123',  name: 'T. Dlamini',  persal: '20482345', dept: 'GPG — Health',       role: 'official',       email: 'official@gpg-demo.gov.za'      },
     { username: 'khumalo',  password: 'pass123',  name: 'N. Khumalo',  persal: '20481111', dept: 'GPG — Finance',      role: 'supervisor',     email: 'supervisor@gpg-demo.gov.za'    },
@@ -1270,9 +1327,43 @@ async function ensureUsersSeeded() {
   }
 }
 
+// ── Startup: idempotent schema migrations ─────────────────────────────────────
+async function runStartupMigrations() {
+  try {
+    await db.query(`
+      DO $$
+      BEGIN
+        BEGIN
+          ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+          ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
+            'official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'
+          ));
+        EXCEPTION WHEN others THEN
+          RAISE NOTICE 'users_role_check: %', SQLERRM;
+        END;
+        BEGIN
+          ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_status_check;
+          ALTER TABLE claims ADD CONSTRAINT claims_status_check CHECK (status IN (
+            'draft','pending','hrm_pending','approved','compiled','verified',
+            'hr_approved','rejected','info_requested','paid'
+          ));
+        EXCEPTION WHEN others THEN
+          RAISE NOTICE 'claims_status_check: %', SQLERRM;
+        END;
+        INSERT INTO sla_targets (status, working_days, label)
+        VALUES ('hrm_pending', 2, 'HRM Supervisor allocation') ON CONFLICT (status) DO NOTHING;
+      END $$;
+    `);
+    console.log('Startup migrations applied.');
+  } catch (err) {
+    console.warn('Startup migration warning:', err.message);
+  }
+}
+
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, async () => {
   console.log(`GPG Travel Claims API → http://localhost:${PORT}`);
   await detectDbCapabilities();
+  await runStartupMigrations();
   await ensureUsersSeeded();
 });

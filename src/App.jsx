@@ -18,6 +18,7 @@ import AuditLog from './components/AuditLog';
 import ClaimModal from './components/ClaimModal';
 import DelegationManager from './components/DelegationManager';
 import SLATargets from './components/SLATargets';
+import UserManager from './components/UserManager';
 import { Toast } from './components/Shared';
 import { api } from './utils/api';
 
@@ -29,7 +30,7 @@ const ROLE_PAGES = {
   verifier:       ['dashboard', 'verifier',       'delegations'],
   approver:       ['dashboard', 'approver',       'delegations'],
   hrs:            ['dashboard', 'hrs',            'delegations'],
-  admin:          ['dashboard', 'tariffs', 'reports', 'audit', 'sla-targets'],
+  admin:          ['dashboard', 'tariffs', 'reports', 'audit', 'sla-targets', 'user-management'],
 };
 
 function AppShell() {
@@ -319,6 +320,9 @@ function AppShell() {
 
       case 'audit':
         return <AuditLog toast={toast} />;
+
+      case 'user-management':
+        return <UserManager />;
 
       default:
         return <Dashboard claims={claims} onNav={onNav} user={user} />;

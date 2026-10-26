@@ -39,10 +39,11 @@ const ALL_NAV = [
   {
     section: 'Admin',
     items: [
-      { id: 'tariffs',     icon: 'table',        label: 'Tariff schedules', roles: ['admin'] },
-      { id: 'reports',     icon: 'chart-bar',    label: 'Reports',          roles: ['admin'] },
-      { id: 'audit',       icon: 'shield-check', label: 'Audit trail',      roles: ['admin'] },
-      { id: 'sla-targets', icon: 'clock-edit',   label: 'SLA targets',      roles: ['admin'] },
+      { id: 'user-management', icon: 'users',        label: 'User management',  roles: ['admin'] },
+      { id: 'tariffs',         icon: 'table',        label: 'Tariff schedules', roles: ['admin'] },
+      { id: 'reports',         icon: 'chart-bar',    label: 'Reports',          roles: ['admin'] },
+      { id: 'audit',           icon: 'shield-check', label: 'Audit trail',      roles: ['admin'] },
+      { id: 'sla-targets',     icon: 'clock-edit',   label: 'SLA targets',      roles: ['admin'] },
     ],
   },
   {
