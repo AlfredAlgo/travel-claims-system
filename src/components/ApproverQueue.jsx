@@ -21,8 +21,8 @@ const FEEDBACK_TARGETS = [
   { value: 'verifier',        label: 'HR Verifier' },
 ];
 
-export default function ApproverQueue({ claims, onApprove, onReject, onViewClaim, onRequestFeedback }) {
-  const queue = claims.filter(c => c.status === 'verified');
+export default function ApproverQueue({ claims, user, onApprove, onReject, onViewClaim, onRequestFeedback }) {
+  const queue = claims.filter(c => c.status === 'verified' && (!c.assignedHrApproverId || c.assignedHrApproverId === user?.id));
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
   const [rejectModal,   setRejectModal]   = useState(null);

@@ -161,9 +161,9 @@ function AppShell() {
           <HrmSupervisorQueue
             claims={claims}
             onViewClaim={setSelectedClaim}
-            onAllocate={async ref => {
+            onAllocate={async (ref, assignments) => {
               try {
-                await updateStatus(ref, 'approved');
+                await updateStatus(ref, 'approved', assignments);
                 toast(`${ref} allocated — HR Compiler notified`);
               } catch (err) { toast('Error: ' + err.message); }
             }}
@@ -187,6 +187,7 @@ function AppShell() {
         return (
           <CompilerQueue
             claims={claims}
+            user={user}
             onViewClaim={setSelectedClaim}
             onCompile={async ref => {
               try {
@@ -221,6 +222,7 @@ function AppShell() {
         return (
           <VerifierQueue
             claims={claims}
+            user={user}
             onViewClaim={setSelectedClaim}
             onVerify={async ref => {
               try {
@@ -255,6 +257,7 @@ function AppShell() {
         return (
           <ApproverQueue
             claims={claims}
+            user={user}
             onViewClaim={setSelectedClaim}
             onApprove={async ref => {
               try {

@@ -5,49 +5,188 @@ const cors       = require('cors');
 const nodemailer = require('nodemailer');
 const path       = require('path');
 const crypto     = require('crypto');
-const { Pool }   = require('pg');
+const sql        = require('mssql');
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'gpg-travel-dev-secret-change-in-prod';
 
 // ── Microsoft Azure AD SSO config ─────────────────────────────────────────────
-const MS_CLIENT_ID    = process.env.AZURE_CLIENT_ID    || '';
+const MS_CLIENT_ID     = process.env.AZURE_CLIENT_ID    || '';
 const MS_CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || '';
-const MS_TENANT       = process.env.AZURE_TENANT_ID    || 'common';
-const MS_REDIRECT_URI = process.env.AZURE_REDIRECT_URI || 'http://localhost:5001/api/auth/callback';
-const MS_AUTH_BASE    = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0`;
+const MS_TENANT        = process.env.AZURE_TENANT_ID    || 'common';
+const MS_REDIRECT_URI  = process.env.AZURE_REDIRECT_URI || 'http://localhost:5001/api/auth/callback';
+const MS_AUTH_BASE     = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0`;
 
-// DATABASE_URL works for both Azure PostgreSQL and Supabase direct PostgreSQL.
-// Azure:    postgresql://user@host:pass@host.postgres.database.azure.com:5432/db?sslmode=require
-// Supabase: postgresql://postgres:pass@db.[ref].supabase.co:5432/postgres
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-});
+// ── Azure SQL connection ───────────────────────────────────────────────────────
+const MSSQL_CONFIG = {
+  server:   process.env.MSSQL_SERVER   || '',
+  database: process.env.MSSQL_DATABASE || '',
+  user:     process.env.MSSQL_USER     || '',
+  password: process.env.MSSQL_PASSWORD || '',
+  port:     parseInt(process.env.MSSQL_PORT) || 1433,
+  options: {
+    encrypt:                true,   // required for Azure SQL
+    trustServerCertificate: false,
+    enableArithAbort:       true,
+  },
+  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+};
 
-// Lightweight query helper
-const db = { query: (text, params) => pool.query(text, params) };
-
-// ── DB helper: fetch a claim with its trips and attachments ──────────────────
-async function getClaimFull(where, param) {
-  const { rows: [claim] } = await db.query(`SELECT * FROM claims WHERE ${where} = $1`, [param]);
-  if (!claim) return null;
-  const [tripsRes, attRes] = await Promise.all([
-    db.query('SELECT * FROM trips WHERE claim_id = $1 ORDER BY trip_order ASC', [claim.id]),
-    DB_CAPS.attachments
-      ? db.query('SELECT id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = $1', [claim.id])
-      : Promise.resolve({ rows: [] }),
-  ]);
-  claim.trips = tripsRes.rows;
-  claim.claim_attachments = attRes.rows;
-  return claim;
+let _pool = null;
+async function getPool() {
+  if (!_pool) _pool = await sql.connect(MSSQL_CONFIG);
+  return _pool;
 }
 
+// ── DB helpers ────────────────────────────────────────────────────────────────
+
+// Parse stored JSON strings back to objects (SQL Server stores JSON as NVARCHAR)
+function tryJson(val, fallback) {
+  if (val == null) return fallback;
+  if (typeof val === 'object') return val;
+  try { return JSON.parse(val); } catch { return fallback; }
+}
+
+// Translate a PostgreSQL-style query ($1/$2, LIMIT, type casts, RETURNING)
+// to SQL Server T-SQL, and return { text, hasOutput }
+function translateQuery(text) {
+  let q = text.trim();
+
+  // Strip PG type casts: $1::uuid[] → @p1
+  q = q.replace(/\$(\d+)::[A-Za-z_\[\]]+/g, '@p$1');
+  // Translate remaining positional params: $1 → @p1
+  q = q.replace(/\$(\d+)/g, '@p$1');
+
+  // LIMIT n → TOP n (move LIMIT value to after SELECT keyword)
+  const limitMatch = q.match(/\bLIMIT\s+(\d+)\s*$/i);
+  if (limitMatch) {
+    q = q.replace(/\bLIMIT\s+\d+\s*$/i, '').trimEnd();
+    q = q.replace(/\bSELECT\b/i, `SELECT TOP ${limitMatch[1]}`);
+  }
+
+  // RETURNING clause → OUTPUT INSERTED.*
+  if (/\bRETURNING\b/i.test(q)) {
+    q = q.replace(/\bRETURNING\s+[\w\s,.*]+$/i, '');
+    if (/^\s*INSERT\b/i.test(q)) {
+      // INSERT ... OUTPUT INSERTED.* VALUES ...
+      q = q.replace(/\bVALUES\b/i, 'OUTPUT INSERTED.* VALUES');
+    } else if (/^\s*UPDATE\b/i.test(q)) {
+      // UPDATE ... SET ... OUTPUT INSERTED.* WHERE ...
+      q = q.replace(/\bWHERE\b/i, 'OUTPUT INSERTED.* WHERE');
+    }
+  }
+
+  return q;
+}
+
+// Standard query: handles $n params, LIMIT, type casts, RETURNING
+const db = {
+  query: async (text, params = []) => {
+    const pool = await getPool();
+    const req  = pool.request();
+    params.forEach((val, i) => req.input(`p${i + 1}`, val));
+    const result = await req.query(translateQuery(text));
+    return { rows: result.recordset || [] };
+  },
+};
+
+// Batch fetch where IDs need to go into an IN() clause (replaces ANY($1::uuid[]))
+async function queryInIds(text, ids, extra = {}) {
+  if (!ids || ids.length === 0) return { rows: [] };
+  const pool = await getPool();
+  const req  = pool.request();
+  const inClause = ids.map((_, i) => `@cid${i}`).join(',');
+  ids.forEach((id, i) => req.input(`cid${i}`, id));
+  Object.entries(extra).forEach(([k, v]) => req.input(k, v));
+  const result = await req.query(text.replace('$$IN$$', inClause));
+  return { rows: result.recordset || [] };
+}
+
+// ── DB capability detection ────────────────────────────────────────────────────
+const DB_CAPS = {
+  userEmail:       false,
+  infoMessage:     false,
+  docLinks:        false,
+  vehicleCategory: false,
+  tariffRate:      false,
+  attachments:     false,
+  tariffSchedules: false,
+  delegations:     false,
+  slaTargets:      false,
+  feedbackMeta:    false,
+};
+
+async function colExists(table, column) {
+  const pool = await getPool();
+  const req  = pool.request();
+  req.input('tbl', table);
+  req.input('col', column);
+  const { recordset } = await req.query(
+    `SELECT TOP 1 1 AS found
+     FROM sys.columns c
+     JOIN sys.tables  t ON t.object_id = c.object_id
+     WHERE t.name = @tbl AND c.name = @col`
+  );
+  return recordset.length > 0;
+}
+
+async function tableExists(table) {
+  const pool = await getPool();
+  const req  = pool.request();
+  req.input('tbl', table);
+  const { recordset } = await req.query(
+    `SELECT TOP 1 1 AS found FROM sys.tables WHERE name = @tbl`
+  );
+  return recordset.length > 0;
+}
+
+async function detectDbCapabilities() {
+  const [
+    userEmail, infoMessage, docLinks, vehicleCategory, tariffRate,
+    attachments, tariffSchedules, delegations, slaTargets, feedbackMeta,
+  ] = await Promise.all([
+    colExists('users',                'email'),
+    colExists('claim_status_history', 'info_message'),
+    colExists('claims',               'doc_links'),
+    colExists('claims',               'vehicle_category'),
+    colExists('claims',               'tariff_rate'),
+    tableExists('claim_attachments'),
+    tableExists('tariff_schedules'),
+    tableExists('delegations'),
+    tableExists('sla_targets'),
+    colExists('claims',               'feedback_recipient_role'),
+  ]);
+  Object.assign(DB_CAPS, {
+    userEmail, infoMessage, docLinks, vehicleCategory, tariffRate,
+    attachments, tariffSchedules, delegations, slaTargets, feedbackMeta,
+  });
+  console.log('DB capabilities:', DB_CAPS);
+}
+
+// ── Delegations helper ────────────────────────────────────────────────────────
+async function getActiveDelegatedRoles(userId) {
+  if (!DB_CAPS.delegations) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  const { rows } = await db.query(
+    `SELECT role FROM delegations WHERE delegate_id=@p1 AND active=1 AND start_date<=@p2 AND end_date>=@p2`,
+    [userId, today]
+  );
+  return rows.map(d => d.role);
+}
+
+async function getEmailsByRole(...roles) {
+  if (!DB_CAPS.userEmail || roles.length === 0) return [];
+  const placeholders = roles.map((_, i) => `@p${i + 1}`).join(',');
+  const { rows } = await db.query(
+    `SELECT email FROM users WHERE role IN (${placeholders})`, roles
+  );
+  return rows.map(u => u.email).filter(Boolean);
+}
+
+// ── Email service ─────────────────────────────────────────────────────────────
 const isProd = process.env.NODE_ENV === 'production';
 app.use(cors(isProd ? {} : { origin: 'http://localhost:3000', credentials: true }));
-app.use(express.json({ limit: '25mb' })); // allow base64-encoded file attachments
-
-// ── Email service ────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '25mb' }));
 
 const transporter = process.env.EMAIL_USER
   ? nodemailer.createTransport({
@@ -73,74 +212,6 @@ async function sendEmail({ to, subject, html }) {
   }
 }
 
-// DB capabilities (detected at startup)
-const DB_CAPS = {
-  userEmail:       false,
-  infoMessage:     false,
-  docLinks:        false,
-  vehicleCategory: false,
-  tariffRate:      false,
-  attachments:     false,
-  tariffSchedules: false,
-  delegations:     false,
-  slaTargets:      false,
-  feedbackMeta:    false,
-};
-
-async function colExists(table, column) {
-  const { rows } = await db.query(
-    `SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2 LIMIT 1`,
-    [table, column]
-  );
-  return rows.length > 0;
-}
-
-async function tableExists(table) {
-  const { rows } = await db.query(
-    `SELECT 1 FROM information_schema.tables WHERE table_name=$1 LIMIT 1`,
-    [table]
-  );
-  return rows.length > 0;
-}
-
-async function detectDbCapabilities() {
-  const [
-    userEmail, infoMessage, docLinks, vehicleCategory, tariffRate,
-    attachments, tariffSchedules, delegations, slaTargets, feedbackMeta,
-  ] = await Promise.all([
-    colExists('users',                'email'),
-    colExists('claim_status_history', 'info_message'),
-    colExists('claims',               'doc_links'),
-    colExists('claims',               'vehicle_category'),
-    colExists('claims',               'tariff_rate'),
-    tableExists('claim_attachments'),
-    tableExists('tariff_schedules'),
-    tableExists('delegations'),
-    tableExists('sla_targets'),
-    colExists('claims',               'feedback_recipient_role'),
-  ]);
-  Object.assign(DB_CAPS, { userEmail, infoMessage, docLinks, vehicleCategory, tariffRate, attachments, tariffSchedules, delegations, slaTargets, feedbackMeta });
-  console.log('DB capabilities:', DB_CAPS);
-}
-
-// Returns the delegated roles for a user (roles they are acting on behalf of today)
-async function getActiveDelegatedRoles(userId) {
-  if (!DB_CAPS.delegations) return [];
-  const today = new Date().toISOString().slice(0, 10);
-  const { rows } = await db.query(
-    `SELECT role FROM delegations WHERE delegate_id=$1 AND active=true AND start_date<=$2 AND end_date>=$2`,
-    [userId, today]
-  );
-  return rows.map(d => d.role);
-}
-
-async function getEmailsByRole(...roles) {
-  if (!DB_CAPS.userEmail || roles.length === 0) return [];
-  const placeholders = roles.map((_, i) => `$${i + 1}`).join(',');
-  const { rows } = await db.query(`SELECT email FROM users WHERE role IN (${placeholders})`, roles);
-  return rows.map(u => u.email).filter(Boolean);
-}
-
 function emailTemplate(title, bodyHtml) {
   return `
     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e0e0e0;border-radius:8px;overflow:hidden">
@@ -159,7 +230,6 @@ function emailTemplate(title, bodyHtml) {
 }
 
 // ── Auth middleware ────────────────────────────────────────────────────────────
-
 function requireAuth(req, res, next) {
   const auth = req.headers.authorization;
   if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
@@ -172,7 +242,6 @@ function requireAuth(req, res, next) {
 }
 
 // ── Shape helpers ─────────────────────────────────────────────────────────────
-
 function normalizeClaim(row) {
   return {
     ref:          row.ref,
@@ -186,11 +255,9 @@ function normalizeClaim(row) {
     logsheet:     row.logsheet,
     dateFrom:     row.date_from,
     dateTo:       row.date_to,
-    // Legacy vehicle fields (old claims)
     vehicleType:  row.vehicle_type,
     engineIdx:    row.engine_idx,
     kmBracket:    row.km_bracket,
-    // New vehicle fields (T118)
     vehicleCategory:      row.vehicle_category     || '',
     fuelType:             row.fuel_type            || 'petrol',
     engineBand:           row.engine_band          || '',
@@ -198,21 +265,22 @@ function normalizeClaim(row) {
     tariffRate:           parseFloat(row.tariff_rate)  || 0,
     persalRef:            row.persal_ref           || '',
     reimbursementScheme:  row.reimbursement_scheme || 'private',
-    isLateSubmission:     row.is_late_submission   || false,
+    isLateSubmission:     !!row.is_late_submission,
     lateSubmissionReason: row.late_submission_reason || '',
-    duplicateException:   row.duplicate_exception  || false,
+    duplicateException:   !!row.duplicate_exception,
     duplicateExceptionNote: row.duplicate_exception_note || '',
     reg:          row.reg,
     km:           parseFloat(row.km)     || 0,
     amount:       parseFloat(row.amount) || 0,
     status:       row.status,
-    docs:         row.docs         || [],
-    docLinks:     row.doc_links    || [],
-    advance:      row.advance,
+    // SQL Server stores JSON as NVARCHAR — parse on read
+    docs:         tryJson(row.docs,          []),
+    docLinks:     tryJson(row.doc_links,     []),
+    advance:      !!row.advance,
     advA:         parseFloat(row.adv_a) || 0,
     advB:         parseFloat(row.adv_b) || 0,
     advC:         parseFloat(row.adv_c) || 0,
-    allocAmounts: row.alloc_amounts || {},
+    allocAmounts: tryJson(row.alloc_amounts, {}),
     mandate:      row.mandate      || '',
     sigName:      row.sig_name,
     sigRank:      row.sig_rank,
@@ -237,23 +305,40 @@ function normalizeClaim(row) {
     })),
     feedbackRecipientRole: row.feedback_recipient_role || null,
     feedbackReturnStatus:  row.feedback_return_status  || null,
+    assignedCompilerId:    row.assigned_compiler_id    || null,
+    assignedVerifierId:    row.assigned_verifier_id    || null,
+    assignedHrApproverId:  row.assigned_hr_approver_id || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-// ── Auth routes ───────────────────────────────────────────────────────────────
+// ── DB helper: fetch a claim with its trips and attachments ───────────────────
+async function getClaimFull(where, param) {
+  const { rows: [claim] } = await db.query(
+    `SELECT * FROM claims WHERE ${where} = @p1`, [param]
+  );
+  if (!claim) return null;
+  const [tripsRes, attRes] = await Promise.all([
+    db.query('SELECT * FROM trips WHERE claim_id = @p1 ORDER BY trip_order ASC', [claim.id]),
+    DB_CAPS.attachments
+      ? db.query('SELECT id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = @p1', [claim.id])
+      : Promise.resolve({ rows: [] }),
+  ]);
+  claim.trips            = tripsRes.rows;
+  claim.claim_attachments = attRes.rows;
+  return claim;
+}
 
+// ── Auth routes ───────────────────────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-
   const { rows } = await db.query(
-    'SELECT * FROM users WHERE username=$1 AND password=$2 LIMIT 1', [username, password]
+    'SELECT TOP 1 * FROM users WHERE username=@p1 AND password=@p2', [username, password]
   );
   const user = rows[0];
   if (!user) return res.status(401).json({ error: 'Invalid username or password' });
-
   const payload = {
     id: user.id, name: user.name, persal: user.persal,
     dept: user.dept, role: user.role, username: user.username, email: user.email || '',
@@ -264,12 +349,10 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/me', requireAuth, (req, res) => res.json(req.user));
 
 // ── Microsoft SSO — initiate ──────────────────────────────────────────────────
-
 app.get('/api/auth/microsoft', (req, res) => {
   if (!MS_CLIENT_ID || !MS_CLIENT_SECRET) {
     return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft SSO is not configured on this server'));
   }
-  // Signed state JWT — no server-side storage needed, works across instances
   const state = jwt.sign({ nonce: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '10m' });
   const params = new URLSearchParams({
     client_id:     MS_CLIENT_ID,
@@ -283,86 +366,64 @@ app.get('/api/auth/microsoft', (req, res) => {
 });
 
 // ── Microsoft SSO — callback ──────────────────────────────────────────────────
-
 app.get('/api/auth/callback', async (req, res) => {
   const { code, state, error, error_description } = req.query;
-
-  if (error) {
-    return res.redirect('/login?sso_error=' + encodeURIComponent(error_description || error));
-  }
-
-  // Verify state to prevent CSRF
+  if (error) return res.redirect('/login?sso_error=' + encodeURIComponent(error_description || error));
   try { jwt.verify(state, JWT_SECRET); }
   catch { return res.redirect('/login?sso_error=' + encodeURIComponent('Invalid or expired SSO state — please try again')); }
-
   try {
-    // Exchange code for tokens
     const tokenRes = await fetch(`${MS_AUTH_BASE}/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         client_id:     MS_CLIENT_ID,
         client_secret: MS_CLIENT_SECRET,
-        code,
-        redirect_uri:  MS_REDIRECT_URI,
-        grant_type:    'authorization_code',
+        code, redirect_uri: MS_REDIRECT_URI,
+        grant_type: 'authorization_code',
       }),
     });
     const tokens = await tokenRes.json();
     if (!tokenRes.ok || !tokens.id_token) {
       return res.redirect('/login?sso_error=' + encodeURIComponent(tokens.error_description || 'Token exchange failed'));
     }
-
-    // Decode Microsoft ID token (JWT) — no signature verification needed; the token was just issued to us
     const msPayload = JSON.parse(Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString());
-    const msEmail = (msPayload.email || msPayload.preferred_username || '').toLowerCase();
+    const msEmail   = (msPayload.email || msPayload.preferred_username || '').toLowerCase();
+    if (!msEmail) return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft account did not return an email address'));
 
-    if (!msEmail) {
-      return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft account did not return an email address'));
-    }
-
-    // Look up the user in our DB by email
     const { rows } = await db.query(
-      'SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1',
-      [msEmail]
+      'SELECT TOP 1 * FROM users WHERE LOWER(email) = @p1', [msEmail]
     );
     const user = rows[0];
-
     if (!user) {
       return res.redirect('/login?sso_error=' + encodeURIComponent(
         `No account found for ${msEmail} — contact your system administrator to provision access`
       ));
     }
-
-    // Issue our own JWT and redirect back to the SPA
     const payload = {
       id: user.id, name: user.name, persal: user.persal,
       dept: user.dept, role: user.role, username: user.username, email: user.email || '',
     };
-    const ssoToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' });
-    res.redirect(`/login?sso_token=${encodeURIComponent(ssoToken)}`);
+    res.redirect(`/login?sso_token=${encodeURIComponent(jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' }))}`);
   } catch (err) {
     res.redirect('/login?sso_error=' + encodeURIComponent('SSO failed: ' + err.message));
   }
 });
 
-// ── Claims routes ─────────────────────────────────────────────────────────────
-
+// ── Claims — GET all ──────────────────────────────────────────────────────────
 app.get('/api/claims', requireAuth, async (req, res) => {
   const { role, persal } = req.user;
   try {
-    const params = role === 'official' ? [persal] : [];
-    const where  = role === 'official' ? 'WHERE c.persal = $1' : '';
-    const { rows: claims } = await db.query(
-      `SELECT * FROM claims c ${where} ORDER BY c.created_at DESC`, params
-    );
+    const { rows: claims } = role === 'official'
+      ? await db.query(`SELECT * FROM claims WHERE persal = @p1 ORDER BY created_at DESC`, [persal])
+      : await db.query(`SELECT * FROM claims ORDER BY created_at DESC`, []);
+
     const claimIds = claims.map(c => c.id);
     if (claimIds.length === 0) return res.json([]);
 
     const [tripsRes, attRes] = await Promise.all([
-      db.query(`SELECT * FROM trips WHERE claim_id = ANY($1::uuid[]) ORDER BY trip_order ASC`, [claimIds]),
+      queryInIds(`SELECT * FROM trips WHERE claim_id IN ($$IN$$) ORDER BY trip_order ASC`, claimIds),
       DB_CAPS.attachments
-        ? db.query(`SELECT id,claim_id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = ANY($1::uuid[])`, [claimIds])
+        ? queryInIds(`SELECT id,claim_id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id IN ($$IN$$)`, claimIds)
         : Promise.resolve({ rows: [] }),
     ]);
 
@@ -382,33 +443,31 @@ app.get('/api/claims', requireAuth, async (req, res) => {
   }
 });
 
+// ── Claims — POST (create) ────────────────────────────────────────────────────
 app.post('/api/claims', requireAuth, async (req, res) => {
   const { user } = req;
   const body     = req.body;
   const trips    = body.trips || [];
   const isDraft  = body.status === 'draft';
 
-  // Validation
   const missing = [];
   if (!body.name?.trim())    missing.push('name');
   if (!body.persal?.trim())  missing.push('persal');
   if (!body.purpose?.trim()) missing.push('purpose');
   if (!isDraft) {
-    if (!body.reg?.trim())   missing.push('reg');
-    if (trips.length === 0)  missing.push('trips');
+    if (!body.reg?.trim())  missing.push('reg');
+    if (trips.length === 0) missing.push('trips');
   }
   if (missing.length > 0) return res.status(400).json({ error: 'Missing required fields', fields: missing });
 
-  // Late submission detection: travel date >30 days ago
-  const earliestTrip = trips.length > 0 ? trips.reduce((min, t) => {
-    const d = t.dateFrom || t.date;
-    return (!min || d < min) ? d : min;
-  }, null) : null;
+  const earliestTrip = trips.length > 0
+    ? trips.reduce((min, t) => { const d = t.dateFrom || t.date; return (!min || d < min) ? d : min; }, null)
+    : null;
   const isLate = earliestTrip
     ? (new Date() - new Date(earliestTrip)) / (1000 * 60 * 60 * 24) > 30
     : false;
 
-  // Duplicate detection (same persal + date + origin + destination)
+  // Duplicate detection
   if (!isDraft && trips.length > 0) {
     const firstTrip = trips[0];
     const originVal = firstTrip.origin;
@@ -417,19 +476,17 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 
     if (originVal && destVal && dateVal) {
       const { rows: dup } = await db.query(
-        `SELECT id, ref FROM claims WHERE persal=$1 AND status NOT IN ('rejected','draft') LIMIT 200`,
+        `SELECT TOP 200 id, ref FROM claims WHERE persal=@p1 AND status NOT IN ('rejected','draft')`,
         [body.persal]
       );
-
       if (dup.length > 0) {
         const dupIds = dup.map(d => d.id);
-        const { rows: dupTrips } = await db.query(
+        const { rows: dupTrips } = await queryInIds(
           `SELECT claim_id, date_from, origin, dest FROM trips
-           WHERE claim_id = ANY($1::uuid[]) AND date_from=$2
-             AND LOWER(origin) LIKE LOWER($3) AND LOWER(dest) LIKE LOWER($4)`,
-          [dupIds, dateVal, originVal, destVal]
+           WHERE claim_id IN ($$IN$$) AND date_from=@dv
+             AND LOWER(origin) LIKE LOWER(@orig) AND LOWER(dest) LIKE LOWER(@dest)`,
+          dupIds, { dv: dateVal, orig: originVal, dest: destVal }
         );
-
         if (dupTrips && dupTrips.length > 0) {
           const dupClaim = dup.find(d => d.id === dupTrips[0].claim_id);
           if (!body.duplicateException) {
@@ -439,13 +496,10 @@ app.post('/api/claims', requireAuth, async (req, res) => {
               message: `A claim for ${body.persal} travelling ${originVal} → ${destVal} on ${dateVal} already exists (${dupClaim?.ref || '—'}). If this trip is different, provide an exception justification.`,
             });
           }
-          // Exception requires both note and a letter attachment
           if (!body.duplicateExceptionNote?.trim()) {
             return res.status(400).json({ error: 'Duplicate exception requires a written justification' });
           }
-          const hasLetter = (body.attachments || []).some(a =>
-            a.fieldKey === 'duplicate_letter' && a.fileData
-          );
+          const hasLetter = (body.attachments || []).some(a => a.fieldKey === 'duplicate_letter' && a.fileData);
           if (!hasLetter) {
             return res.status(400).json({ error: 'Duplicate exception requires a letter upload (duplicate_letter)' });
           }
@@ -469,16 +523,16 @@ app.post('/api/claims', requireAuth, async (req, res) => {
         duplicate_exception, duplicate_exception_note,
         reg, km, amount, status, docs, doc_links, advance,
         adv_a, adv_b, adv_c, alloc_amounts, sig_name, sig_rank, sig_date
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,
-        $10,$11,$12,$13,$14,
-        $15,$16,$17,$18,
-        $19,$20,$21,
-        $22,$23,
-        $24,$25,
-        $26,$27,$28,$29,$30,$31,$32,
-        $33,$34,$35,$36,$37,$38,$39
-      ) RETURNING *`,
+      ) OUTPUT INSERTED.* VALUES (
+        @p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,
+        @p10,@p11,@p12,@p13,@p14,
+        @p15,@p16,@p17,@p18,
+        @p19,@p20,@p21,
+        @p22,@p23,
+        @p24,@p25,
+        @p26,@p27,@p28,@p29,@p30,@p31,@p32,
+        @p33,@p34,@p35,@p36,@p37,@p38,@p39
+      )`,
       [
         ref, user.id, body.name, body.persal, body.dept||'', body.contact||'', body.phone||'',
         body.purpose, body.logsheet||'',
@@ -486,11 +540,12 @@ app.post('/api/claims', requireAuth, async (req, res) => {
         body.vehicleType||'', body.engineIdx||'', body.kmBracket||'',
         body.vehicleCategory||'A', body.fuelType||'petrol', body.engineBand||'', body.weightBand||'',
         parseFloat(body.tariffRate)||0, body.persalRef||'', body.reimbursementScheme||'private',
-        isLate, body.lateSubmissionReason||'',
-        !!body.duplicateException, body.duplicateExceptionNote||'',
+        isLate ? 1 : 0, body.lateSubmissionReason||'',
+        body.duplicateException ? 1 : 0, body.duplicateExceptionNote||'',
         body.reg||'', body.km||0, body.amount||0,
         isDraft ? 'draft' : 'pending',
-        JSON.stringify(body.docs||[]), JSON.stringify(body.docLinks||[]), body.advance||false,
+        JSON.stringify(body.docs||[]), JSON.stringify(body.docLinks||[]),
+        body.advance ? 1 : 0,
         body.advA||0, body.advB||0, body.advC||0,
         JSON.stringify(body.allocAmounts||{}),
         body.sigName||'', body.sigRank||'', body.sigDate||null,
@@ -501,38 +556,35 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 
   if (claimErr) return res.status(500).json({ error: claimErr.message });
 
-  // Insert trips
   if (trips.length > 0) {
     try {
       for (let i = 0; i < trips.length; i++) {
         const t = trips[i];
         await db.query(
           `INSERT INTO trips (claim_id, trip_order, date_from, date_to, origin, dest, km)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+           VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
           [claim.id, i, t.dateFrom||t.date||null, t.dateTo||t.date||null, t.origin||'', t.dest||'', t.km||0]
         );
       }
     } catch (err) { return res.status(500).json({ error: err.message }); }
   }
 
-  // Store file attachments (base64)
   const attachments = body.attachments || [];
   if (DB_CAPS.attachments && attachments.length > 0) {
     for (const a of attachments.filter(a => a.fileData && a.fileName)) {
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+         VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
         [claim.id, a.fieldKey||'general', a.fileName, a.fileData, a.mimeType||'application/octet-stream', a.fileSize||0, user.id]
       );
     }
   }
 
-  // Re-fetch with trips + attachments
   const claimWithTrips = await getClaimFull('id', claim.id);
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note)
-     VALUES ($1,$2,$3,$4,$5)`,
+     VALUES (@p1,@p2,@p3,@p4,@p5)`,
     [claim.id, null, isDraft ? 'draft' : 'pending', user.id, isDraft ? 'Draft saved' : 'Claim submitted']
   );
 
@@ -543,8 +595,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
       to: supEmails,
       subject: `[GPG Claims] New claim submitted — ${ref}`,
       html: emailTemplate('New claim requires approval',
-        `<p>A new travel claim has been submitted and is waiting for your approval.</p>${claimSummary}<p style="margin-top:20px">Please log in to review and approve or reject this claim.</p>`
-      ),
+        `<p>A new travel claim has been submitted and is waiting for your approval.</p>${claimSummary}`),
     });
   }
 
@@ -552,8 +603,6 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 });
 
 // ── Status transition ─────────────────────────────────────────────────────────
-
-// Transition rules: which roles can set each status, and from which current status
 const TRANSITION_RULES = {
   hrm_pending: { roles: ['supervisor'],       from: ['pending']     },
   approved:    { roles: ['hrm_supervisor'],   from: ['hrm_pending'] },
@@ -566,7 +615,6 @@ const TRANSITION_RULES = {
   pending:     { roles: ['official'],         from: ['draft']       },
 };
 
-// For rejections: validate the actor can reject the current claim status
 const REJECTION_FROM = {
   supervisor:     ['pending'],
   hrm_supervisor: ['hrm_pending'],
@@ -586,123 +634,85 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   let effectiveRole = user.role;
   if (!rule.roles.includes(user.role)) {
-    // Check if user has an active delegation covering a required role
     const delegatedRoles = await getActiveDelegatedRoles(user.id);
-    const matchedRole = rule.roles.find(r => delegatedRoles.includes(r));
-    if (!matchedRole) {
-      return res.status(403).json({ error: 'Forbidden: your role cannot set this status' });
-    }
+    const matchedRole    = rule.roles.find(r => delegatedRoles.includes(r));
+    if (!matchedRole) return res.status(403).json({ error: 'Forbidden: your role cannot set this status' });
     effectiveRole = matchedRole;
   }
 
-  const userEmailJoin = DB_CAPS.userEmail
-    ? 'LEFT JOIN users u ON u.id = c.user_id'
-    : '';
-  const userEmailSel = DB_CAPS.userEmail ? ', u.name AS owner_name, u.email AS owner_email' : '';
+  const userEmailJoin = DB_CAPS.userEmail ? 'LEFT JOIN users u ON u.id = c.user_id' : '';
+  const userEmailSel  = DB_CAPS.userEmail ? ', u.name AS owner_name, u.email AS owner_email' : '';
   const { rows: [existing] } = await db.query(
     `SELECT c.id, c.status, c.name, c.persal, c.dept, c.purpose, c.amount, c.user_id ${userEmailSel}
-     FROM claims c ${userEmailJoin} WHERE c.ref=$1`,
+     FROM claims c ${userEmailJoin} WHERE c.ref=@p1`,
     [ref]
   );
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
 
-  // Validate from-status
   if (status === 'rejected') {
     let allowed = REJECTION_FROM[effectiveRole] || [];
     if (!allowed.includes(existing.status)) {
-      // Also check any additional delegated roles
       const delegatedRoles = await getActiveDelegatedRoles(user.id);
-      for (const dr of delegatedRoles) {
-        allowed = [...allowed, ...(REJECTION_FROM[dr] || [])];
-      }
+      for (const dr of delegatedRoles) allowed = [...allowed, ...(REJECTION_FROM[dr] || [])];
     }
     if (!allowed.includes(existing.status)) {
       return res.status(403).json({ error: `Your role cannot reject a claim in '${existing.status}' status` });
     }
-    if (!note?.trim()) {
-      return res.status(400).json({ error: 'Rejection reason is required' });
-    }
+    if (!note?.trim()) return res.status(400).json({ error: 'Rejection reason is required' });
   } else if (rule.from && !rule.from.includes(existing.status)) {
-    return res.status(400).json({
-      error: `Cannot move from '${existing.status}' to '${status}'`,
-    });
+    return res.status(400).json({ error: `Cannot move from '${existing.status}' to '${status}'` });
   }
 
-  await db.query('UPDATE claims SET status=$1 WHERE ref=$2', [status, ref]);
+  await db.query('UPDATE claims SET status=@p1 WHERE ref=@p2', [status, ref]);
+
+  // When HRM Supervisor allocates, save the assigned processor IDs
+  if (status === 'approved') {
+    const { assignedCompilerId, assignedVerifierId, assignedHrApproverId } = req.body;
+    if (assignedCompilerId || assignedVerifierId || assignedHrApproverId) {
+      await db.query(
+        `UPDATE claims SET assigned_compiler_id=@p1, assigned_verifier_id=@p2, assigned_hr_approver_id=@p3 WHERE ref=@p4`,
+        [assignedCompilerId||null, assignedVerifierId||null, assignedHrApproverId||null, ref]
+      );
+    }
+  }
+
   const updated = await getClaimFull('ref', ref);
   if (!updated) return res.status(500).json({ error: 'Claim update failed' });
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
+     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
     [existing.id, existing.status, status, user.id, note||'', DB_CAPS.infoMessage && note ? note : null]
   );
 
-  const officialEmail = existing.owner_email;
+  const officialEmail    = existing.owner_email;
   const claimSummaryHtml = buildClaimSummaryHtml(ref, existing.name, existing.dept, existing.purpose, existing.amount);
 
-  // Notifications per status
   if (status === 'hrm_pending') {
-    const hrmEmails = await getEmailsByRole('hrm_supervisor');
-    sendEmail({
-      to: hrmEmails,
-      subject: `[GPG Claims] Claim awaiting allocation — ${ref}`,
-      html: emailTemplate('Claim ready for allocation',
-        `<p>Claim <strong>${ref}</strong> has been approved by the line manager and is awaiting allocation to the HR compiler.</p>${claimSummaryHtml}`),
-    });
+    sendEmail({ to: await getEmailsByRole('hrm_supervisor'), subject: `[GPG Claims] Claim awaiting allocation — ${ref}`,
+      html: emailTemplate('Claim ready for allocation', `<p>Claim <strong>${ref}</strong> has been approved by the line manager and is awaiting allocation to the HR compiler.</p>${claimSummaryHtml}`) });
   }
-
   if (status === 'approved') {
-    const compilerEmails = await getEmailsByRole('compiler');
-    sendEmail({
-      to: compilerEmails,
-      subject: `[GPG Claims] Claim allocated — ${ref}`,
-      html: emailTemplate('Claim allocated to HR Compiler',
-        `<p>Claim <strong>${ref}</strong> has been allocated and is now in the HR Compiler queue.</p>${claimSummaryHtml}`),
-    });
+    sendEmail({ to: await getEmailsByRole('compiler'), subject: `[GPG Claims] Claim allocated — ${ref}`,
+      html: emailTemplate('Claim allocated to HR Compiler', `<p>Claim <strong>${ref}</strong> has been allocated and is now in the HR Compiler queue.</p>${claimSummaryHtml}`) });
   }
-
   if (status === 'compiled') {
-    const verifierEmails = await getEmailsByRole('verifier');
-    sendEmail({
-      to: verifierEmails,
-      subject: `[GPG Claims] Claim compiled — ${ref}`,
-      html: emailTemplate('Claim ready for verification',
-        `<p>Claim <strong>${ref}</strong> has been compiled and is ready for verification.</p>${claimSummaryHtml}`),
-    });
+    sendEmail({ to: await getEmailsByRole('verifier'), subject: `[GPG Claims] Claim compiled — ${ref}`,
+      html: emailTemplate('Claim ready for verification', `<p>Claim <strong>${ref}</strong> has been compiled and is ready for verification.</p>${claimSummaryHtml}`) });
   }
-
   if (status === 'verified') {
-    const approverEmails = await getEmailsByRole('approver');
-    sendEmail({
-      to: approverEmails,
-      subject: `[GPG Claims] Claim verified — ${ref}`,
-      html: emailTemplate('Claim ready for HR approval',
-        `<p>Claim <strong>${ref}</strong> has been verified and is ready for HR approval.</p>${claimSummaryHtml}`),
-    });
+    sendEmail({ to: await getEmailsByRole('approver'), subject: `[GPG Claims] Claim verified — ${ref}`,
+      html: emailTemplate('Claim ready for HR approval', `<p>Claim <strong>${ref}</strong> has been verified and is ready for HR approval.</p>${claimSummaryHtml}`) });
   }
-
   if (status === 'hr_approved') {
     const hrsEmails = await getEmailsByRole('hrs');
-    // Notify HRS for payment + notify compiler & verifier for visibility
-    const compilerVerifierEmails = await getEmailsByRole('compiler', 'verifier');
-    sendEmail({
-      to: [...hrsEmails, ...compilerVerifierEmails].filter(Boolean),
-      subject: `[GPG Claims] Claim HR-approved — ${ref}`,
-      html: emailTemplate('Claim ready for payment processing',
-        `<p>Claim <strong>${ref}</strong> has been HR-approved and is ready for payment processing on Persal.</p>${claimSummaryHtml}`),
-    });
-    sendEmail({
-      to: officialEmail,
-      subject: `[GPG Claims] Your claim has been approved — ${ref}`,
-      html: emailTemplate('Your claim has been fully approved',
-        `<p>Your travel claim has been approved and is with HRS for payment processing.</p>${claimSummaryHtml}`),
-    });
+    const cvEmails  = await getEmailsByRole('compiler', 'verifier');
+    sendEmail({ to: [...hrsEmails, ...cvEmails].filter(Boolean), subject: `[GPG Claims] Claim HR-approved — ${ref}`,
+      html: emailTemplate('Claim ready for payment processing', `<p>Claim <strong>${ref}</strong> has been HR-approved and is ready for payment processing on Persal.</p>${claimSummaryHtml}`) });
+    sendEmail({ to: officialEmail, subject: `[GPG Claims] Your claim has been approved — ${ref}`,
+      html: emailTemplate('Your claim has been fully approved', `<p>Your travel claim has been approved and is with HRS for payment processing.</p>${claimSummaryHtml}`) });
   }
-
   if (status === 'rejected') {
-    // HRS rejection → compiler + approver only, NOT official
-    // All other rejections → official + relevant supervisors
     const REJECTION_NOTIFY = {
       supervisor:     { notifyOfficial: true,  extraRoles: [] },
       hrm_supervisor: { notifyOfficial: true,  extraRoles: ['supervisor'] },
@@ -711,46 +721,37 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
       approver:       { notifyOfficial: true,  extraRoles: ['supervisor', 'compiler', 'verifier'] },
       hrs:            { notifyOfficial: false, extraRoles: ['compiler', 'approver'] },
     };
-    const notify = REJECTION_NOTIFY[effectiveRole] || { notifyOfficial: true, extraRoles: [] };
+    const notify     = REJECTION_NOTIFY[effectiveRole] || { notifyOfficial: true, extraRoles: [] };
     const extraEmails = notify.extraRoles.length > 0 ? await getEmailsByRole(...notify.extraRoles) : [];
-    const toList = [...(notify.notifyOfficial && officialEmail ? [officialEmail] : []), ...extraEmails].filter(Boolean);
-    sendEmail({
-      to: toList,
-      subject: `[GPG Claims] Claim rejected — ${ref}`,
+    const toList      = [...(notify.notifyOfficial && officialEmail ? [officialEmail] : []), ...extraEmails].filter(Boolean);
+    sendEmail({ to: toList, subject: `[GPG Claims] Claim rejected — ${ref}`,
       html: emailTemplate('Claim has been rejected',
         `<p>Claim <strong>${ref}</strong> was rejected by ${user.name} (${effectiveRole}).</p>${claimSummaryHtml}
          <div style="margin-top:16px;padding:14px;background:#fff0f0;border-left:3px solid #e02d3c;border-radius:4px">
            <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Reason:</p>
            <p style="margin:8px 0 0;font-size:14px">${note || '—'}</p>
-         </div>`),
-    });
+         </div>`) });
   }
-
   if (status === 'paid') {
-    const compilerApproverEmails = await getEmailsByRole('compiler', 'approver');
-    sendEmail({
-      to: [officialEmail, ...compilerApproverEmails].filter(Boolean),
-      subject: `[GPG Claims] Claim paid — ${ref}`,
+    const caEmails = await getEmailsByRole('compiler', 'approver');
+    sendEmail({ to: [officialEmail, ...caEmails].filter(Boolean), subject: `[GPG Claims] Claim paid — ${ref}`,
       html: emailTemplate('Claim has been paid',
         `<p>Travel claim <strong>${ref}</strong> has been processed and payment has been confirmed on Persal.</p>${claimSummaryHtml}
-         <p style="margin-top:16px;color:#0F6E56;font-weight:bold">Payment processed.</p>`),
-    });
+         <p style="margin-top:16px;color:#0F6E56;font-weight:bold">Payment processed.</p>`) });
   }
 
   res.json(normalizeClaim(updated));
 });
 
-// ── Info request — any HR-chain role, with selectable target ─────────────────
-
+// ── Info request ──────────────────────────────────────────────────────────────
 app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
-  // queueStatus = the status that puts this claim back in the REQUESTER's queue after the target responds
   const REQUEST_INFO_CONFIG = {
-    supervisor:     { allowedTargets: ['official'],                                                     queueStatus: 'pending'     },
-    hrm_supervisor: { allowedTargets: ['official', 'supervisor'],                                       queueStatus: 'hrm_pending' },
-    compiler:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor'],                     queueStatus: 'approved'    },
-    verifier:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler'],         queueStatus: 'compiled'    },
-    approver:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler', 'verifier'], queueStatus: 'verified' },
-    hrs:            { allowedTargets: ['compiler', 'approver'],                                         queueStatus: 'hr_approved' },
+    supervisor:     { allowedTargets: ['official'],                                                          queueStatus: 'pending'     },
+    hrm_supervisor: { allowedTargets: ['official', 'supervisor'],                                            queueStatus: 'hrm_pending' },
+    compiler:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor'],                          queueStatus: 'approved'    },
+    verifier:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler'],              queueStatus: 'compiled'    },
+    approver:       { allowedTargets: ['official', 'supervisor', 'hrm_supervisor', 'compiler', 'verifier'],  queueStatus: 'verified'    },
+    hrs:            { allowedTargets: ['compiler', 'approver'],                                              queueStatus: 'hr_approved' },
   };
 
   const config = REQUEST_INFO_CONFIG[req.user.role];
@@ -761,21 +762,18 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
   if (!message?.trim()) return res.status(400).json({ error: 'Message is required' });
 
   const recipientRole = targetRole && config.allowedTargets.includes(targetRole)
-    ? targetRole
-    : config.allowedTargets[0];
-
+    ? targetRole : config.allowedTargets[0];
   if (!config.allowedTargets.includes(recipientRole)) {
-    return res.status(400).json({ error: `Invalid target role for your position` });
+    return res.status(400).json({ error: 'Invalid target role for your position' });
   }
 
   const emailJoin = DB_CAPS.userEmail ? 'LEFT JOIN users u ON u.id = c.user_id' : '';
   const emailSel  = DB_CAPS.userEmail ? ', u.email AS owner_email' : '';
   const { rows: [existing] } = await db.query(
     `SELECT c.id, c.status, c.name, c.purpose, c.amount, c.user_id, c.persal ${emailSel}
-     FROM claims c ${emailJoin} WHERE c.ref=$1`,
+     FROM claims c ${emailJoin} WHERE c.ref=@p1`,
     [ref]
   );
-
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
   if (existing.status !== config.queueStatus) {
     return res.status(400).json({ error: `Claim must be in '${config.queueStatus}' status` });
@@ -783,17 +781,17 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
 
   if (DB_CAPS.feedbackMeta) {
     await db.query(
-      `UPDATE claims SET status='info_requested', feedback_recipient_role=$1, feedback_return_status=$2 WHERE ref=$3`,
+      `UPDATE claims SET status='info_requested', feedback_recipient_role=@p1, feedback_return_status=@p2 WHERE ref=@p3`,
       [recipientRole, config.queueStatus, ref]
     );
   } else {
-    await db.query(`UPDATE claims SET status='info_requested' WHERE ref=$1`, [ref]);
+    await db.query(`UPDATE claims SET status='info_requested' WHERE ref=@p1`, [ref]);
   }
   const updated = await getClaimFull('ref', ref);
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
+     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
     [existing.id, config.queueStatus, 'info_requested', req.user.id, message, DB_CAPS.infoMessage ? message : null]
   );
 
@@ -801,7 +799,6 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
     official: 'Official', supervisor: 'Supervisor', hrm_supervisor: 'HRM Supervisor',
     compiler: 'HR Compiler', verifier: 'HR Verifier', approver: 'HR Approver', hrs: 'HRS',
   };
-
   let recipientEmails = [];
   if (recipientRole === 'official') {
     if (existing.owner_email) recipientEmails = [existing.owner_email];
@@ -817,25 +814,22 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
        <div style="margin-top:16px;padding:14px;background:#f3f0ff;border-left:3px solid #534AB7;border-radius:4px">
          <p style="margin:0;font-size:13px;font-weight:bold;color:#666">Changes requested:</p>
          <p style="margin:8px 0 0;font-size:14px">${message}</p>
-       </div>
-       <p style="margin-top:16px">Please log in to respond from your portal. You may attach replacement documents in your response.</p>`),
+       </div>`),
   });
 
   res.json(normalizeClaim(updated));
 });
 
-// ── Respond to feedback / info request (any authorised role) ─────────────────
-
+// ── Respond to feedback ───────────────────────────────────────────────────────
 app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   const { ref } = req.params;
   const { message, attachments: newAttachments } = req.body;
 
   const { rows: [existing] } = await db.query(
     `SELECT id, status, name, purpose, persal, feedback_recipient_role, feedback_return_status
-     FROM claims WHERE ref=$1`,
+     FROM claims WHERE ref=@p1`,
     [ref]
   );
-
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
   if (existing.status !== 'info_requested') {
     return res.status(400).json({ error: 'Claim is not in info_requested state' });
@@ -854,11 +848,11 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   const returnStatus = existing.feedback_return_status || 'hr_approved';
   if (DB_CAPS.feedbackMeta) {
     await db.query(
-      `UPDATE claims SET status=$1, feedback_recipient_role=NULL, feedback_return_status=NULL WHERE ref=$2`,
+      `UPDATE claims SET status=@p1, feedback_recipient_role=NULL, feedback_return_status=NULL WHERE ref=@p2`,
       [returnStatus, ref]
     );
   } else {
-    await db.query(`UPDATE claims SET status=$1 WHERE ref=$2`, [returnStatus, ref]);
+    await db.query(`UPDATE claims SET status=@p1 WHERE ref=@p2`, [returnStatus, ref]);
   }
   const updated = await getClaimFull('ref', ref);
 
@@ -866,29 +860,25 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
     for (const a of newAttachments.filter(a => a.fileData && a.fileName)) {
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [existing.id, a.fieldKey || 'feedback-response', a.fileName, a.fileData,
-         a.mimeType || 'application/octet-stream', a.fileSize || 0, req.user.id]
+         VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+        [existing.id, a.fieldKey||'feedback-response', a.fileName, a.fileData,
+         a.mimeType||'application/octet-stream', a.fileSize||0, req.user.id]
       );
     }
   }
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES ($1,$2,$3,$4,$5,$6)`,
+     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
     [existing.id, 'info_requested', returnStatus, req.user.id,
-     message || 'Response provided', DB_CAPS.infoMessage ? (message || '') : null]
+     message||'Response provided', DB_CAPS.infoMessage ? (message||'') : null]
   );
 
   const STAGE_ROLES = {
-    pending:     ['supervisor'],
-    hrm_pending: ['hrm_supervisor'],
-    approved:    ['compiler'],
-    compiled:    ['verifier'],
-    verified:    ['approver'],
-    hr_approved: ['hrs'],
+    pending: ['supervisor'], hrm_pending: ['hrm_supervisor'], approved: ['compiler'],
+    compiled: ['verifier'], verified: ['approver'], hr_approved: ['hrs'],
   };
-  const notifyRoles = STAGE_ROLES[returnStatus] || [];
+  const notifyRoles  = STAGE_ROLES[returnStatus] || [];
   const notifyEmails = await getEmailsByRole(...notifyRoles);
   sendEmail({
     to: notifyEmails,
@@ -903,40 +893,34 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
 });
 
 // ── Attachment download ───────────────────────────────────────────────────────
-
 app.get('/api/claims/:ref/attachments/:attachmentId', requireAuth, async (req, res) => {
   if (!DB_CAPS.attachments) return res.status(404).json({ error: 'Attachments not enabled' });
-
-  const { attachmentId } = req.params;
   const { rows: [attach] } = await db.query(
-    `SELECT * FROM claim_attachments WHERE id=$1`, [attachmentId]
+    `SELECT * FROM claim_attachments WHERE id=@p1`, [req.params.attachmentId]
   );
-
   if (!attach) return res.status(404).json({ error: 'Attachment not found' });
-
   const buffer = Buffer.from(attach.file_data, 'base64');
   res.set('Content-Type', attach.mime_type);
   res.set('Content-Disposition', `attachment; filename="${attach.file_name}"`);
   res.send(buffer);
 });
 
-// ── Save e-signature ──────────────────────────────────────────────────────────
-
+// ── E-signatures ──────────────────────────────────────────────────────────────
 app.post('/api/claims/:ref/signature', requireAuth, async (req, res) => {
   if (!DB_CAPS.attachments) return res.status(400).json({ error: 'Attachments not enabled' });
   const { ref } = req.params;
   const { fieldKey, imageData } = req.body;
-  const ALLOWED = ['sig_official', 'sig_supervisor', 'sig_approver'];
+  const ALLOWED = ['sig_official', 'sig_supervisor', 'sig_hrm_supervisor', 'sig_approver'];
   if (!ALLOWED.includes(fieldKey)) return res.status(400).json({ error: 'Invalid signature field' });
   try {
-    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = @p1', [ref]);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
-    await db.query('DELETE FROM claim_attachments WHERE claim_id = $1 AND field_key = $2', [claim.id, fieldKey]);
+    await db.query('DELETE FROM claim_attachments WHERE claim_id = @p1 AND field_key = @p2', [claim.id, fieldKey]);
     if (imageData) {
       const base64 = imageData.replace(/^data:[^;]+;base64,/, '');
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES ($1,$2,$3,$4,'image/png',$5,$6)`,
+         VALUES (@p1,@p2,@p3,@p4,'image/png',@p5,@p6)`,
         [claim.id, fieldKey, `${fieldKey}.png`, base64, Math.round(base64.length * 0.75), req.user.id]
       );
     }
@@ -944,16 +928,15 @@ app.post('/api/claims/:ref/signature', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Fetch signatures for PDF embedding ────────────────────────────────────────
-
 app.get('/api/claims/:ref/signatures', requireAuth, async (req, res) => {
   if (!DB_CAPS.attachments) return res.json({});
   const { ref } = req.params;
   try {
-    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = @p1', [ref]);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
     const { rows } = await db.query(
-      `SELECT field_key, file_data, mime_type FROM claim_attachments WHERE claim_id = $1 AND field_key LIKE 'sig_%'`,
+      `SELECT field_key, file_data, mime_type FROM claim_attachments
+       WHERE claim_id = @p1 AND field_key LIKE 'sig_%'`,
       [claim.id]
     );
     const result = {};
@@ -962,21 +945,19 @@ app.get('/api/claims/:ref/signatures', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Tariff schedule endpoints (admin) ─────────────────────────────────────────
-
+// ── Tariff schedules ──────────────────────────────────────────────────────────
 app.get('/api/tariff-schedules', requireAuth, async (req, res) => {
   if (!DB_CAPS.tariffSchedules) return res.json([]);
-
   try {
     const { rows: schedules } = await db.query(
       `SELECT * FROM tariff_schedules ORDER BY effective_date DESC`
     );
     const scheduleIds = schedules.map(s => s.id);
-    const { rows: rates } = scheduleIds.length > 0
-      ? await db.query(`SELECT * FROM tariff_rates WHERE schedule_id = ANY($1::uuid[])`, [scheduleIds])
+    const ratesRes = scheduleIds.length > 0
+      ? await queryInIds(`SELECT * FROM tariff_rates WHERE schedule_id IN ($$IN$$)`, scheduleIds)
       : { rows: [] };
     const ratesBySchedule = {};
-    rates.forEach(r => { (ratesBySchedule[r.schedule_id] ||= []).push(r); });
+    ratesRes.rows.forEach(r => { (ratesBySchedule[r.schedule_id] ||= []).push(r); });
     res.json(schedules.map(s => ({ ...s, tariff_rates: ratesBySchedule[s.id] || [] })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -984,30 +965,25 @@ app.get('/api/tariff-schedules', requireAuth, async (req, res) => {
 app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   if (!DB_CAPS.tariffSchedules) return res.status(503).json({ error: 'Tariff schedules not available' });
-
   const { circularRef, effectiveDate, notes, rates } = req.body;
   if (!circularRef || !effectiveDate) return res.status(400).json({ error: 'circularRef and effectiveDate required' });
-
   try {
     const { rows: [schedule] } = await db.query(
       `INSERT INTO tariff_schedules (circular_ref, effective_date, notes, created_by)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [circularRef, effectiveDate, notes || '', req.user.id]
+       OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4)`,
+      [circularRef, effectiveDate, notes||'', req.user.id]
     );
-
     let insertedRates = [];
     if (rates && rates.length > 0) {
       for (const r of rates) {
         const { rows: [rate] } = await db.query(
           `INSERT INTO tariff_rates (schedule_id, category, fuel_type, band, scheme, rate_rand, persal_ref)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [schedule.id, r.category, r.fuelType || 'petrol', r.band,
-           r.scheme || 'private', parseFloat(r.rateRand) || 0, r.persalRef || '']
+           OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+          [schedule.id, r.category, r.fuelType||'petrol', r.band, r.scheme||'private', parseFloat(r.rateRand)||0, r.persalRef||'']
         );
         insertedRates.push(rate);
       }
     }
-
     res.status(201).json({ ...schedule, tariff_rates: insertedRates });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1015,17 +991,15 @@ app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
 app.delete('/api/tariff-schedules/:id', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   try {
-    await db.query(`DELETE FROM tariff_schedules WHERE id=$1`, [req.params.id]);
+    await db.query(`DELETE FROM tariff_schedules WHERE id=@p1`, [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Claim history ─────────────────────────────────────────────────────────────
-
 app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
-  const { rows: [claim] } = await db.query(`SELECT id FROM claims WHERE ref=$1`, [req.params.ref]);
+  const { rows: [claim] } = await db.query(`SELECT id FROM claims WHERE ref=@p1`, [req.params.ref]);
   if (!claim) return res.status(404).json({ error: 'Claim not found' });
-
   try {
     const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
     const { rows } = await db.query(
@@ -1033,22 +1007,17 @@ app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
               u.name AS user_name, u.role AS user_role
        FROM claim_status_history h
        LEFT JOIN users u ON u.id = h.changed_by
-       WHERE h.claim_id=$1
+       WHERE h.claim_id=@p1
        ORDER BY h.created_at ASC`,
       [claim.id]
     );
-    res.json(rows.map(r => ({
-      ...r,
-      users: { name: r.user_name, role: r.user_role },
-    })));
+    res.json(rows.map(r => ({ ...r, users: { name: r.user_name, role: r.user_role } })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── SLA targets ───────────────────────────────────────────────────────────────
-
 app.get('/api/sla-targets', requireAuth, async (req, res) => {
   if (!DB_CAPS.slaTargets) {
-    // Return hardcoded defaults if table not available
     return res.json([
       { status: 'pending',     working_days: 5, label: 'Supervisor approval' },
       { status: 'approved',    working_days: 3, label: 'Compiler processing' },
@@ -1069,8 +1038,9 @@ app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
   const { working_days } = req.body;
   if (!working_days || working_days < 1) return res.status(400).json({ error: 'working_days must be >= 1' });
   try {
+    // SQL Server: UPDATE with OUTPUT before WHERE
     const { rows: [updated] } = await db.query(
-      `UPDATE sla_targets SET working_days=$1 WHERE status=$2 RETURNING *`,
+      `UPDATE sla_targets SET working_days=@p1 OUTPUT INSERTED.* WHERE status=@p2`,
       [working_days, req.params.status]
     );
     if (!updated) return res.status(404).json({ error: 'SLA target not found' });
@@ -1079,7 +1049,6 @@ app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
 });
 
 // ── Delegations ───────────────────────────────────────────────────────────────
-
 app.get('/api/delegations', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.json([]);
   try {
@@ -1090,7 +1059,7 @@ app.get('/api/delegations', requireAuth, async (req, res) => {
        FROM delegations d
        JOIN users tor ON tor.id = d.delegator_id
        JOIN users tee ON tee.id = d.delegate_id
-       WHERE d.delegator_id=$1 OR d.delegate_id=$1
+       WHERE d.delegator_id=@p1 OR d.delegate_id=@p1
        ORDER BY d.created_at DESC`,
       [req.user.id]
     );
@@ -1107,29 +1076,18 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
   const { delegateId, role, startDate, endDate, reason } = req.body;
   const { user } = req;
-
   if (!delegateId || !role || !startDate || !endDate) {
     return res.status(400).json({ error: 'delegateId, role, startDate, endDate are required' });
   }
-  // Can only delegate your own role
-  if (role !== user.role) {
-    return res.status(403).json({ error: 'You can only delegate your own role' });
-  }
-  if (delegateId === user.id) {
-    return res.status(400).json({ error: 'Cannot delegate to yourself' });
-  }
-  if (endDate < startDate) {
-    return res.status(400).json({ error: 'End date must be on or after start date' });
-  }
-
+  if (role !== user.role)        return res.status(403).json({ error: 'You can only delegate your own role' });
+  if (delegateId === user.id)    return res.status(400).json({ error: 'Cannot delegate to yourself' });
+  if (endDate < startDate)       return res.status(400).json({ error: 'End date must be on or after start date' });
   try {
     const { rows: [del] } = await db.query(
       `INSERT INTO delegations (delegator_id, delegate_id, role, start_date, end_date, reason, active)
-       VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING *`,
-      [user.id, delegateId, role, startDate, endDate, reason || '']
+       OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4,@p5,@p6,1)`,
+      [user.id, delegateId, role, startDate, endDate, reason||'']
     );
-
-    // Fetch joined view to return same shape as GET
     const { rows: [full] } = await db.query(
       `SELECT d.id, d.role, d.start_date, d.end_date, d.reason, d.active, d.created_at,
               tor.id AS delegator_id, tor.name AS delegator_name, tor.persal AS delegator_persal, tor.role AS delegator_role,
@@ -1137,12 +1095,11 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
        FROM delegations d
        JOIN users tor ON tor.id = d.delegator_id
        JOIN users tee ON tee.id = d.delegate_id
-       WHERE d.id=$1`,
+       WHERE d.id=@p1`,
       [del.id]
     );
-
     if (DB_CAPS.userEmail) {
-      const { rows: [delegateUser] } = await db.query(`SELECT email FROM users WHERE id=$1`, [delegateId]);
+      const { rows: [delegateUser] } = await db.query(`SELECT email FROM users WHERE id=@p1`, [delegateId]);
       if (delegateUser?.email) {
         sendEmail({
           to: delegateUser.email,
@@ -1154,12 +1111,10 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
                <tr><td style="padding:5px 0;color:#666">From</td><td style="padding:5px 0">${startDate}</td></tr>
                <tr><td style="padding:5px 0;color:#666">To</td><td style="padding:5px 0">${endDate}</td></tr>
                ${reason ? `<tr><td style="padding:5px 0;color:#666">Reason</td><td style="padding:5px 0">${reason}</td></tr>` : ''}
-             </table>
-             <p style="margin-top:16px">Log in to the GPG Travel Claims system to act on claims in this capacity.</p>`),
+             </table>`),
         });
       }
     }
-
     res.status(201).json(full ? {
       id: full.id, role: full.role, start_date: full.start_date, end_date: full.end_date,
       reason: full.reason, active: full.active, created_at: full.created_at,
@@ -1173,25 +1128,26 @@ app.delete('/api/delegations/:id', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
   try {
     const { rows: [existing] } = await db.query(
-      `SELECT delegator_id FROM delegations WHERE id=$1`, [req.params.id]
+      `SELECT delegator_id FROM delegations WHERE id=@p1`, [req.params.id]
     );
     if (!existing) return res.status(404).json({ error: 'Delegation not found' });
     if (existing.delegator_id !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Only the delegator can revoke a delegation' });
     }
-    await db.query(`UPDATE delegations SET active=false WHERE id=$1`, [req.params.id]);
+    await db.query(`UPDATE delegations SET active=0 WHERE id=@p1`, [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Users (admin CRUD) ────────────────────────────────────────────────────────
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    const cols = req.user.role === 'admin'
+    // admin and hrm_supervisor need id+name+role to populate allocation pickers
+    const fullCols = ['admin', 'hrm_supervisor'].includes(req.user.role);
+    const cols = fullCols
       ? 'id, username, name, persal, dept, role, email, created_at'
       : 'id, name, persal, role, dept';
-    const { rows } = await db.query(
-      `SELECT ${cols} FROM users ORDER BY role, name`
-    );
+    const { rows } = await db.query(`SELECT ${cols} FROM users ORDER BY role, name`);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1200,17 +1156,20 @@ const VALID_ROLES = ['official','supervisor','hrm_supervisor','compiler','verifi
 
 app.post('/api/users', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { name, email, role, persal = '', dept = '', username: uname, password: pw = '' } = req.body;
-  if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
+  const { name, email, role, persal='', dept='', username: uname, password: pw='' } = req.body;
+  if (!name?.trim())  return res.status(400).json({ error: 'Name is required' });
   if (!email?.trim()) return res.status(400).json({ error: 'Email is required' });
   if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   const username = (uname || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9._-]/g, '');
   try {
-    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE username=$1 OR LOWER(email)=LOWER($2)', [username, email]);
+    const { rows: [existing] } = await db.query(
+      'SELECT TOP 1 id FROM users WHERE username=@p1 OR LOWER(email)=LOWER(@p2)', [username, email]
+    );
     if (existing) return res.status(409).json({ error: 'A user with that username or email already exists' });
     const { rows: [user] } = await db.query(
       `INSERT INTO users (username, password, name, persal, dept, role, email)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, username, name, persal, dept, role, email, created_at`,
+       OUTPUT INSERTED.id, INSERTED.username, INSERTED.name, INSERTED.persal, INSERTED.dept, INSERTED.role, INSERTED.email, INSERTED.created_at
+       VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
       [username, pw, name.trim(), persal.trim(), dept.trim(), role, email.trim().toLowerCase()]
     );
     res.status(201).json(user);
@@ -1222,20 +1181,20 @@ app.patch('/api/users/:id', requireAuth, async (req, res) => {
   const { name, email, role, persal, dept, password: pw } = req.body;
   if (role && !VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   try {
-    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1', [req.params.id]);
+    const { rows: [existing] } = await db.query('SELECT TOP 1 id FROM users WHERE id=@p1', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'User not found' });
     const { rows: [user] } = await db.query(
       `UPDATE users SET
-        name     = COALESCE($1, name),
-        email    = COALESCE($2, email),
-        role     = COALESCE($3, role),
-        persal   = COALESCE($4, persal),
-        dept     = COALESCE($5, dept),
-        password = CASE WHEN $6 IS NOT NULL AND $6 <> '' THEN $6 ELSE password END
-       WHERE id = $7
-       RETURNING id, username, name, persal, dept, role, email, created_at`,
-      [name?.trim() || null, email?.trim().toLowerCase() || null, role || null,
-       persal?.trim() ?? null, dept?.trim() ?? null, pw || null, req.params.id]
+        name     = COALESCE(@p1, name),
+        email    = COALESCE(@p2, email),
+        role     = COALESCE(@p3, role),
+        persal   = COALESCE(@p4, persal),
+        dept     = COALESCE(@p5, dept),
+        password = CASE WHEN @p6 IS NOT NULL AND @p6 <> '' THEN @p6 ELSE password END
+       OUTPUT INSERTED.id, INSERTED.username, INSERTED.name, INSERTED.persal, INSERTED.dept, INSERTED.role, INSERTED.email, INSERTED.created_at
+       WHERE id = @p7`,
+      [name?.trim()||null, email?.trim().toLowerCase()||null, role||null,
+       persal?.trim()??null, dept?.trim()??null, pw||null, req.params.id]
     );
     res.json(user);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1247,28 +1206,26 @@ app.delete('/api/users/:id', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Cannot delete your own account' });
   }
   try {
-    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1', [req.params.id]);
+    const { rows: [existing] } = await db.query('SELECT TOP 1 id FROM users WHERE id=@p1', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'User not found' });
-    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
+    await db.query('DELETE FROM users WHERE id=@p1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Audit log (admin only) ────────────────────────────────────────────────────
-
+// ── Audit log ─────────────────────────────────────────────────────────────────
 app.get('/api/audit', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   try {
     const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
     const { rows } = await db.query(
-      `SELECT h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
+      `SELECT TOP 500 h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
               u.name AS user_name, u.role AS user_role,
               c.ref AS claim_ref, c.name AS claim_name, c.persal AS claim_persal, c.dept AS claim_dept
        FROM claim_status_history h
        LEFT JOIN users u  ON u.id  = h.changed_by
        LEFT JOIN claims c ON c.id  = h.claim_id
-       ORDER BY h.created_at DESC
-       LIMIT 500`
+       ORDER BY h.created_at DESC`
     );
     res.json(rows.map(r => ({
       ...r,
@@ -1279,7 +1236,6 @@ app.get('/api/audit', requireAuth, async (req, res) => {
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
 function buildClaimSummaryHtml(ref, name, dept, purpose, amount) {
   return `
     <table style="width:100%;border-collapse:collapse;font-size:14px">
@@ -1287,20 +1243,18 @@ function buildClaimSummaryHtml(ref, name, dept, purpose, amount) {
       <tr><td style="padding:6px 0;color:#666">Official</td><td style="padding:6px 0">${name}</td></tr>
       ${dept ? `<tr><td style="padding:6px 0;color:#666">Business unit</td><td style="padding:6px 0">${dept}</td></tr>` : ''}
       <tr><td style="padding:6px 0;color:#666">Purpose</td><td style="padding:6px 0">${purpose || '—'}</td></tr>
-      <tr><td style="padding:6px 0;color:#666">Amount</td><td style="padding:6px 0;font-weight:bold">R ${(parseFloat(amount) || 0).toFixed(2)}</td></tr>
+      <tr><td style="padding:6px 0;color:#666">Amount</td><td style="padding:6px 0;font-weight:bold">R ${(parseFloat(amount)||0).toFixed(2)}</td></tr>
     </table>`;
 }
 
 // ── Serve React build in production ──────────────────────────────────────────
-
 if (isProd) {
   const buildDir = path.join(__dirname, '..', 'build');
   app.use(express.static(buildDir));
   app.get(/(.*)/, (req, res) => res.sendFile(path.join(buildDir, 'index.html')));
 }
 
-// ── Startup ───────────────────────────────────────────────────────────────────
-
+// ── Startup: seed demo users ──────────────────────────────────────────────────
 async function ensureUsersSeeded() {
   const DEMO = [
     { username: 'dlamini',  password: 'pass123',  name: 'T. Dlamini',  persal: '20482345', dept: 'GPG — Health',       role: 'official',       email: 'official@gpg-demo.gov.za'      },
@@ -1312,14 +1266,22 @@ async function ensureUsersSeeded() {
     { username: 'sithole',  password: 'pass123',  name: 'B. Sithole',  persal: '20489876', dept: 'GPG — Internal HR',  role: 'hrs',            email: 'internalhr@gpg-demo.gov.za'    },
     { username: 'admin',    password: 'admin123', name: 'Admin User',  persal: '',         dept: 'GPG — System Admin', role: 'admin',          email: 'admin@gpg-demo.gov.za'         },
   ];
-
   try {
+    const pool = await getPool();
     for (const u of DEMO) {
-      await db.query(
-        `INSERT INTO users (username, password, name, persal, dept, role, email)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (username) DO NOTHING`,
-        [u.username, u.password, u.name, u.persal, u.dept, u.role, DB_CAPS.userEmail ? u.email : null]
-      );
+      const req = pool.request();
+      req.input('un', u.username);
+      req.input('pw', u.password);
+      req.input('nm', u.name);
+      req.input('ps', u.persal);
+      req.input('dp', u.dept);
+      req.input('rl', u.role);
+      req.input('em', DB_CAPS.userEmail ? u.email : null);
+      await req.query(`
+        IF NOT EXISTS (SELECT 1 FROM users WHERE username = @un)
+          INSERT INTO users (username, password, name, persal, dept, role, email)
+          VALUES (@un, @pw, @nm, @ps, @dp, @rl, @em)
+      `);
     }
     console.log('Demo users seeded.');
   } catch (err) {
@@ -1330,40 +1292,76 @@ async function ensureUsersSeeded() {
 // ── Startup: idempotent schema migrations ─────────────────────────────────────
 async function runStartupMigrations() {
   try {
-    await db.query(`
-      DO $$
-      BEGIN
-        BEGIN
-          ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
-          ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
-            'official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'
-          ));
-        EXCEPTION WHEN others THEN
-          RAISE NOTICE 'users_role_check: %', SQLERRM;
-        END;
-        BEGIN
-          ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_status_check;
-          ALTER TABLE claims ADD CONSTRAINT claims_status_check CHECK (status IN (
-            'draft','pending','hrm_pending','approved','compiled','verified',
-            'hr_approved','rejected','info_requested','paid'
-          ));
-        EXCEPTION WHEN others THEN
-          RAISE NOTICE 'claims_status_check: %', SQLERRM;
-        END;
-        INSERT INTO sla_targets (status, working_days, label)
-        VALUES ('hrm_pending', 2, 'HRM Supervisor allocation') ON CONFLICT (status) DO NOTHING;
-      END $$;
+    const pool = await getPool();
+
+    // Ensure users_role_check constraint is current
+    await pool.request().query(`
+      BEGIN TRY
+        IF EXISTS (SELECT 1 FROM sys.check_constraints
+                   WHERE name = 'ck_users_role' AND parent_object_id = OBJECT_ID('users'))
+          ALTER TABLE users DROP CONSTRAINT ck_users_role;
+        IF EXISTS (SELECT 1 FROM sys.check_constraints
+                   WHERE name = 'users_role_check' AND parent_object_id = OBJECT_ID('users'))
+          ALTER TABLE users DROP CONSTRAINT users_role_check;
+        ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN (
+          'official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'
+        ));
+      END TRY BEGIN CATCH END CATCH;
     `);
+
+    // Ensure claims_status_check constraint is current
+    await pool.request().query(`
+      BEGIN TRY
+        IF EXISTS (SELECT 1 FROM sys.check_constraints
+                   WHERE name = 'ck_claims_status' AND parent_object_id = OBJECT_ID('claims'))
+          ALTER TABLE claims DROP CONSTRAINT ck_claims_status;
+        IF EXISTS (SELECT 1 FROM sys.check_constraints
+                   WHERE name = 'claims_status_check' AND parent_object_id = OBJECT_ID('claims'))
+          ALTER TABLE claims DROP CONSTRAINT claims_status_check;
+        ALTER TABLE claims ADD CONSTRAINT ck_claims_status CHECK (status IN (
+          'draft','pending','hrm_pending','approved','compiled','verified',
+          'hr_approved','rejected','info_requested','paid'
+        ));
+      END TRY BEGIN CATCH END CATCH;
+    `);
+
+    // Ensure HRM Supervisor SLA row exists
+    await pool.request().query(`
+      IF NOT EXISTS (SELECT 1 FROM sla_targets WHERE status = 'hrm_pending')
+        INSERT INTO sla_targets (status, working_days, label)
+        VALUES ('hrm_pending', 2, 'HRM Supervisor allocation');
+    `);
+
+    // Add HR processor assignment columns to claims
+    await pool.request().query(`
+      BEGIN TRY
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_compiler_id')
+          ALTER TABLE claims ADD assigned_compiler_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_verifier_id')
+          ALTER TABLE claims ADD assigned_verifier_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
+        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_hr_approver_id')
+          ALTER TABLE claims ADD assigned_hr_approver_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
+      END TRY BEGIN CATCH END CATCH;
+    `);
+
     console.log('Startup migrations applied.');
   } catch (err) {
     console.warn('Startup migration warning:', err.message);
   }
 }
 
+// ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, async () => {
   console.log(`GPG Travel Claims API → http://localhost:${PORT}`);
-  await detectDbCapabilities();
-  await runStartupMigrations();
-  await ensureUsersSeeded();
+  try {
+    await getPool();
+    console.log('Azure SQL connected.');
+    await detectDbCapabilities();
+    await runStartupMigrations();
+    await ensureUsersSeeded();
+  } catch (err) {
+    console.error('DB connection failed:', err.message);
+    console.error('Set MSSQL_SERVER, MSSQL_DATABASE, MSSQL_USER, MSSQL_PASSWORD in .env or Azure App Service config.');
+  }
 });

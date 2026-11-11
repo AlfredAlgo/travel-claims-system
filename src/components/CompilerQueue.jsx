@@ -18,9 +18,9 @@ const FEEDBACK_TARGETS = [
   { value: 'hrm_supervisor',  label: 'HRM Supervisor' },
 ];
 
-export default function CompilerQueue({ claims, onCompile, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
-  const queue        = claims.filter(c => c.status === 'approved');
-  const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'compiler');
+export default function CompilerQueue({ claims, user, onCompile, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
+  const queue        = claims.filter(c => c.status === 'approved' && (!c.assignedCompilerId || c.assignedCompilerId === user?.id));
+  const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'compiler' && (!c.assignedCompilerId || c.assignedCompilerId === user?.id));
 
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);

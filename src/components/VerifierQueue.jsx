@@ -21,9 +21,9 @@ const FEEDBACK_TARGETS = [
   { value: 'compiler',        label: 'HR Compiler' },
 ];
 
-export default function VerifierQueue({ claims, onVerify, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
-  const queue           = claims.filter(c => c.status === 'compiled');
-  const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'verifier');
+export default function VerifierQueue({ claims, user, onVerify, onReject, onViewClaim, onRequestFeedback, onRespondFeedback }) {
+  const queue           = claims.filter(c => c.status === 'compiled' && (!c.assignedVerifierId || c.assignedVerifierId === user?.id));
+  const feedbackPending = claims.filter(c => c.status === 'info_requested' && c.feedbackRecipientRole === 'verifier' && (!c.assignedVerifierId || c.assignedVerifierId === user?.id));
 
   const [filtered, setFiltered] = useState(queue);
   const handleFilter = useCallback(r => setFiltered(r), []);
