@@ -5,7 +5,7 @@ const cors       = require('cors');
 const nodemailer = require('nodemailer');
 const path       = require('path');
 const crypto     = require('crypto');
-const sql        = require('mssql');
+const { Pool }   = require('pg');
 
 const app = express();
 const JWT_SECRET = process.env.JWT_SECRET || 'gpg-travel-dev-secret-change-in-prod';
@@ -17,90 +17,15 @@ const MS_TENANT        = process.env.AZURE_TENANT_ID    || 'common';
 const MS_REDIRECT_URI  = process.env.AZURE_REDIRECT_URI || 'http://localhost:5001/api/auth/callback';
 const MS_AUTH_BASE     = `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0`;
 
-// ── Azure SQL connection ───────────────────────────────────────────────────────
-const MSSQL_CONFIG = {
-  server:   process.env.MSSQL_SERVER   || '',
-  database: process.env.MSSQL_DATABASE || '',
-  user:     process.env.MSSQL_USER     || '',
-  password: process.env.MSSQL_PASSWORD || '',
-  port:     parseInt(process.env.MSSQL_PORT) || 1433,
-  options: {
-    encrypt:                true,   // required for Azure SQL
-    trustServerCertificate: false,
-    enableArithAbort:       true,
-  },
-  pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
-};
+// DATABASE_URL works for both Azure PostgreSQL and Supabase direct PostgreSQL.
+// Azure:    postgresql://user@host:pass@host.postgres.database.azure.com:5432/db?sslmode=require
+// Supabase: postgresql://postgres:pass@db.[ref].supabase.co:5432/postgres
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-let _pool = null;
-async function getPool() {
-  if (!_pool) _pool = await sql.connect(MSSQL_CONFIG);
-  return _pool;
-}
-
-// ── DB helpers ────────────────────────────────────────────────────────────────
-
-// Parse stored JSON strings back to objects (SQL Server stores JSON as NVARCHAR)
-function tryJson(val, fallback) {
-  if (val == null) return fallback;
-  if (typeof val === 'object') return val;
-  try { return JSON.parse(val); } catch { return fallback; }
-}
-
-// Translate a PostgreSQL-style query ($1/$2, LIMIT, type casts, RETURNING)
-// to SQL Server T-SQL, and return { text, hasOutput }
-function translateQuery(text) {
-  let q = text.trim();
-
-  // Strip PG type casts: $1::uuid[] → @p1
-  q = q.replace(/\$(\d+)::[A-Za-z_\[\]]+/g, '@p$1');
-  // Translate remaining positional params: $1 → @p1
-  q = q.replace(/\$(\d+)/g, '@p$1');
-
-  // LIMIT n → TOP n (move LIMIT value to after SELECT keyword)
-  const limitMatch = q.match(/\bLIMIT\s+(\d+)\s*$/i);
-  if (limitMatch) {
-    q = q.replace(/\bLIMIT\s+\d+\s*$/i, '').trimEnd();
-    q = q.replace(/\bSELECT\b/i, `SELECT TOP ${limitMatch[1]}`);
-  }
-
-  // RETURNING clause → OUTPUT INSERTED.*
-  if (/\bRETURNING\b/i.test(q)) {
-    q = q.replace(/\bRETURNING\s+[\w\s,.*]+$/i, '');
-    if (/^\s*INSERT\b/i.test(q)) {
-      // INSERT ... OUTPUT INSERTED.* VALUES ...
-      q = q.replace(/\bVALUES\b/i, 'OUTPUT INSERTED.* VALUES');
-    } else if (/^\s*UPDATE\b/i.test(q)) {
-      // UPDATE ... SET ... OUTPUT INSERTED.* WHERE ...
-      q = q.replace(/\bWHERE\b/i, 'OUTPUT INSERTED.* WHERE');
-    }
-  }
-
-  return q;
-}
-
-// Standard query: handles $n params, LIMIT, type casts, RETURNING
-const db = {
-  query: async (text, params = []) => {
-    const pool = await getPool();
-    const req  = pool.request();
-    params.forEach((val, i) => req.input(`p${i + 1}`, val));
-    const result = await req.query(translateQuery(text));
-    return { rows: result.recordset || [] };
-  },
-};
-
-// Batch fetch where IDs need to go into an IN() clause (replaces ANY($1::uuid[]))
-async function queryInIds(text, ids, extra = {}) {
-  if (!ids || ids.length === 0) return { rows: [] };
-  const pool = await getPool();
-  const req  = pool.request();
-  const inClause = ids.map((_, i) => `@cid${i}`).join(',');
-  ids.forEach((id, i) => req.input(`cid${i}`, id));
-  Object.entries(extra).forEach(([k, v]) => req.input(k, v));
-  const result = await req.query(text.replace('$$IN$$', inClause));
-  return { rows: result.recordset || [] };
-}
+const db = { query: (text, params) => pool.query(text, params) };
 
 // ── DB capability detection ────────────────────────────────────────────────────
 const DB_CAPS = {
@@ -117,27 +42,19 @@ const DB_CAPS = {
 };
 
 async function colExists(table, column) {
-  const pool = await getPool();
-  const req  = pool.request();
-  req.input('tbl', table);
-  req.input('col', column);
-  const { recordset } = await req.query(
-    `SELECT TOP 1 1 AS found
-     FROM sys.columns c
-     JOIN sys.tables  t ON t.object_id = c.object_id
-     WHERE t.name = @tbl AND c.name = @col`
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name=$1 AND column_name=$2 LIMIT 1`,
+    [table, column]
   );
-  return recordset.length > 0;
+  return rows.length > 0;
 }
 
 async function tableExists(table) {
-  const pool = await getPool();
-  const req  = pool.request();
-  req.input('tbl', table);
-  const { recordset } = await req.query(
-    `SELECT TOP 1 1 AS found FROM sys.tables WHERE name = @tbl`
+  const { rows } = await db.query(
+    `SELECT 1 FROM information_schema.tables WHERE table_name=$1 LIMIT 1`,
+    [table]
   );
-  return recordset.length > 0;
+  return rows.length > 0;
 }
 
 async function detectDbCapabilities() {
@@ -156,10 +73,7 @@ async function detectDbCapabilities() {
     tableExists('sla_targets'),
     colExists('claims',               'feedback_recipient_role'),
   ]);
-  Object.assign(DB_CAPS, {
-    userEmail, infoMessage, docLinks, vehicleCategory, tariffRate,
-    attachments, tariffSchedules, delegations, slaTargets, feedbackMeta,
-  });
+  Object.assign(DB_CAPS, { userEmail, infoMessage, docLinks, vehicleCategory, tariffRate, attachments, tariffSchedules, delegations, slaTargets, feedbackMeta });
   console.log('DB capabilities:', DB_CAPS);
 }
 
@@ -168,7 +82,7 @@ async function getActiveDelegatedRoles(userId) {
   if (!DB_CAPS.delegations) return [];
   const today = new Date().toISOString().slice(0, 10);
   const { rows } = await db.query(
-    `SELECT role FROM delegations WHERE delegate_id=@p1 AND active=1 AND start_date<=@p2 AND end_date>=@p2`,
+    `SELECT role FROM delegations WHERE delegate_id=$1 AND active=true AND start_date<=$2 AND end_date>=$2`,
     [userId, today]
   );
   return rows.map(d => d.role);
@@ -176,10 +90,8 @@ async function getActiveDelegatedRoles(userId) {
 
 async function getEmailsByRole(...roles) {
   if (!DB_CAPS.userEmail || roles.length === 0) return [];
-  const placeholders = roles.map((_, i) => `@p${i + 1}`).join(',');
-  const { rows } = await db.query(
-    `SELECT email FROM users WHERE role IN (${placeholders})`, roles
-  );
+  const placeholders = roles.map((_, i) => `$${i + 1}`).join(',');
+  const { rows } = await db.query(`SELECT email FROM users WHERE role IN (${placeholders})`, roles);
   return rows.map(u => u.email).filter(Boolean);
 }
 
@@ -265,22 +177,21 @@ function normalizeClaim(row) {
     tariffRate:           parseFloat(row.tariff_rate)  || 0,
     persalRef:            row.persal_ref           || '',
     reimbursementScheme:  row.reimbursement_scheme || 'private',
-    isLateSubmission:     !!row.is_late_submission,
+    isLateSubmission:     row.is_late_submission   || false,
     lateSubmissionReason: row.late_submission_reason || '',
-    duplicateException:   !!row.duplicate_exception,
+    duplicateException:   row.duplicate_exception  || false,
     duplicateExceptionNote: row.duplicate_exception_note || '',
     reg:          row.reg,
     km:           parseFloat(row.km)     || 0,
     amount:       parseFloat(row.amount) || 0,
     status:       row.status,
-    // SQL Server stores JSON as NVARCHAR — parse on read
-    docs:         tryJson(row.docs,          []),
-    docLinks:     tryJson(row.doc_links,     []),
-    advance:      !!row.advance,
+    docs:         row.docs         || [],
+    docLinks:     row.doc_links    || [],
+    advance:      row.advance,
     advA:         parseFloat(row.adv_a) || 0,
     advB:         parseFloat(row.adv_b) || 0,
     advC:         parseFloat(row.adv_c) || 0,
-    allocAmounts: tryJson(row.alloc_amounts, {}),
+    allocAmounts: row.alloc_amounts || {},
     mandate:      row.mandate      || '',
     sigName:      row.sig_name,
     sigRank:      row.sig_rank,
@@ -315,17 +226,15 @@ function normalizeClaim(row) {
 
 // ── DB helper: fetch a claim with its trips and attachments ───────────────────
 async function getClaimFull(where, param) {
-  const { rows: [claim] } = await db.query(
-    `SELECT * FROM claims WHERE ${where} = @p1`, [param]
-  );
+  const { rows: [claim] } = await db.query(`SELECT * FROM claims WHERE ${where} = $1`, [param]);
   if (!claim) return null;
   const [tripsRes, attRes] = await Promise.all([
-    db.query('SELECT * FROM trips WHERE claim_id = @p1 ORDER BY trip_order ASC', [claim.id]),
+    db.query('SELECT * FROM trips WHERE claim_id = $1 ORDER BY trip_order ASC', [claim.id]),
     DB_CAPS.attachments
-      ? db.query('SELECT id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = @p1', [claim.id])
+      ? db.query('SELECT id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = $1', [claim.id])
       : Promise.resolve({ rows: [] }),
   ]);
-  claim.trips            = tripsRes.rows;
+  claim.trips = tripsRes.rows;
   claim.claim_attachments = attRes.rows;
   return claim;
 }
@@ -335,7 +244,7 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
   const { rows } = await db.query(
-    'SELECT TOP 1 * FROM users WHERE username=@p1 AND password=@p2', [username, password]
+    'SELECT * FROM users WHERE username=$1 AND password=$2 LIMIT 1', [username, password]
   );
   const user = rows[0];
   if (!user) return res.status(401).json({ error: 'Invalid username or password' });
@@ -389,10 +298,7 @@ app.get('/api/auth/callback', async (req, res) => {
     const msPayload = JSON.parse(Buffer.from(tokens.id_token.split('.')[1], 'base64url').toString());
     const msEmail   = (msPayload.email || msPayload.preferred_username || '').toLowerCase();
     if (!msEmail) return res.redirect('/login?sso_error=' + encodeURIComponent('Microsoft account did not return an email address'));
-
-    const { rows } = await db.query(
-      'SELECT TOP 1 * FROM users WHERE LOWER(email) = @p1', [msEmail]
-    );
+    const { rows } = await db.query('SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1', [msEmail]);
     const user = rows[0];
     if (!user) {
       return res.redirect('/login?sso_error=' + encodeURIComponent(
@@ -413,17 +319,18 @@ app.get('/api/auth/callback', async (req, res) => {
 app.get('/api/claims', requireAuth, async (req, res) => {
   const { role, persal } = req.user;
   try {
-    const { rows: claims } = role === 'official'
-      ? await db.query(`SELECT * FROM claims WHERE persal = @p1 ORDER BY created_at DESC`, [persal])
-      : await db.query(`SELECT * FROM claims ORDER BY created_at DESC`, []);
-
+    const params = role === 'official' ? [persal] : [];
+    const where  = role === 'official' ? 'WHERE c.persal = $1' : '';
+    const { rows: claims } = await db.query(
+      `SELECT * FROM claims c ${where} ORDER BY c.created_at DESC`, params
+    );
     const claimIds = claims.map(c => c.id);
     if (claimIds.length === 0) return res.json([]);
 
     const [tripsRes, attRes] = await Promise.all([
-      queryInIds(`SELECT * FROM trips WHERE claim_id IN ($$IN$$) ORDER BY trip_order ASC`, claimIds),
+      db.query(`SELECT * FROM trips WHERE claim_id = ANY($1::uuid[]) ORDER BY trip_order ASC`, [claimIds]),
       DB_CAPS.attachments
-        ? queryInIds(`SELECT id,claim_id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id IN ($$IN$$)`, claimIds)
+        ? db.query(`SELECT id,claim_id,field_key,file_name,mime_type,file_size,created_at FROM claim_attachments WHERE claim_id = ANY($1::uuid[])`, [claimIds])
         : Promise.resolve({ rows: [] }),
     ]);
 
@@ -467,7 +374,6 @@ app.post('/api/claims', requireAuth, async (req, res) => {
     ? (new Date() - new Date(earliestTrip)) / (1000 * 60 * 60 * 24) > 30
     : false;
 
-  // Duplicate detection
   if (!isDraft && trips.length > 0) {
     const firstTrip = trips[0];
     const originVal = firstTrip.origin;
@@ -476,16 +382,16 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 
     if (originVal && destVal && dateVal) {
       const { rows: dup } = await db.query(
-        `SELECT TOP 200 id, ref FROM claims WHERE persal=@p1 AND status NOT IN ('rejected','draft')`,
+        `SELECT id, ref FROM claims WHERE persal=$1 AND status NOT IN ('rejected','draft') LIMIT 200`,
         [body.persal]
       );
       if (dup.length > 0) {
         const dupIds = dup.map(d => d.id);
-        const { rows: dupTrips } = await queryInIds(
+        const { rows: dupTrips } = await db.query(
           `SELECT claim_id, date_from, origin, dest FROM trips
-           WHERE claim_id IN ($$IN$$) AND date_from=@dv
-             AND LOWER(origin) LIKE LOWER(@orig) AND LOWER(dest) LIKE LOWER(@dest)`,
-          dupIds, { dv: dateVal, orig: originVal, dest: destVal }
+           WHERE claim_id = ANY($1::uuid[]) AND date_from=$2
+             AND LOWER(origin) LIKE LOWER($3) AND LOWER(dest) LIKE LOWER($4)`,
+          [dupIds, dateVal, originVal, destVal]
         );
         if (dupTrips && dupTrips.length > 0) {
           const dupClaim = dup.find(d => d.id === dupTrips[0].claim_id);
@@ -523,16 +429,16 @@ app.post('/api/claims', requireAuth, async (req, res) => {
         duplicate_exception, duplicate_exception_note,
         reg, km, amount, status, docs, doc_links, advance,
         adv_a, adv_b, adv_c, alloc_amounts, sig_name, sig_rank, sig_date
-      ) OUTPUT INSERTED.* VALUES (
-        @p1,@p2,@p3,@p4,@p5,@p6,@p7,@p8,@p9,
-        @p10,@p11,@p12,@p13,@p14,
-        @p15,@p16,@p17,@p18,
-        @p19,@p20,@p21,
-        @p22,@p23,
-        @p24,@p25,
-        @p26,@p27,@p28,@p29,@p30,@p31,@p32,
-        @p33,@p34,@p35,@p36,@p37,@p38,@p39
-      )`,
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,
+        $10,$11,$12,$13,$14,
+        $15,$16,$17,$18,
+        $19,$20,$21,
+        $22,$23,
+        $24,$25,
+        $26,$27,$28,$29,$30,$31,$32,
+        $33,$34,$35,$36,$37,$38,$39
+      ) RETURNING *`,
       [
         ref, user.id, body.name, body.persal, body.dept||'', body.contact||'', body.phone||'',
         body.purpose, body.logsheet||'',
@@ -540,12 +446,11 @@ app.post('/api/claims', requireAuth, async (req, res) => {
         body.vehicleType||'', body.engineIdx||'', body.kmBracket||'',
         body.vehicleCategory||'A', body.fuelType||'petrol', body.engineBand||'', body.weightBand||'',
         parseFloat(body.tariffRate)||0, body.persalRef||'', body.reimbursementScheme||'private',
-        isLate ? 1 : 0, body.lateSubmissionReason||'',
-        body.duplicateException ? 1 : 0, body.duplicateExceptionNote||'',
+        isLate, body.lateSubmissionReason||'',
+        !!body.duplicateException, body.duplicateExceptionNote||'',
         body.reg||'', body.km||0, body.amount||0,
         isDraft ? 'draft' : 'pending',
-        JSON.stringify(body.docs||[]), JSON.stringify(body.docLinks||[]),
-        body.advance ? 1 : 0,
+        JSON.stringify(body.docs||[]), JSON.stringify(body.docLinks||[]), body.advance||false,
         body.advA||0, body.advB||0, body.advC||0,
         JSON.stringify(body.allocAmounts||{}),
         body.sigName||'', body.sigRank||'', body.sigDate||null,
@@ -562,7 +467,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
         const t = trips[i];
         await db.query(
           `INSERT INTO trips (claim_id, trip_order, date_from, date_to, origin, dest, km)
-           VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
           [claim.id, i, t.dateFrom||t.date||null, t.dateTo||t.date||null, t.origin||'', t.dest||'', t.km||0]
         );
       }
@@ -574,7 +479,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
     for (const a of attachments.filter(a => a.fileData && a.fileName)) {
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [claim.id, a.fieldKey||'general', a.fileName, a.fileData, a.mimeType||'application/octet-stream', a.fileSize||0, user.id]
       );
     }
@@ -584,7 +489,7 @@ app.post('/api/claims', requireAuth, async (req, res) => {
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note)
-     VALUES (@p1,@p2,@p3,@p4,@p5)`,
+     VALUES ($1,$2,$3,$4,$5)`,
     [claim.id, null, isDraft ? 'draft' : 'pending', user.id, isDraft ? 'Draft saved' : 'Claim submitted']
   );
 
@@ -644,7 +549,7 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
   const userEmailSel  = DB_CAPS.userEmail ? ', u.name AS owner_name, u.email AS owner_email' : '';
   const { rows: [existing] } = await db.query(
     `SELECT c.id, c.status, c.name, c.persal, c.dept, c.purpose, c.amount, c.user_id ${userEmailSel}
-     FROM claims c ${userEmailJoin} WHERE c.ref=@p1`,
+     FROM claims c ${userEmailJoin} WHERE c.ref=$1`,
     [ref]
   );
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
@@ -663,14 +568,14 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
     return res.status(400).json({ error: `Cannot move from '${existing.status}' to '${status}'` });
   }
 
-  await db.query('UPDATE claims SET status=@p1 WHERE ref=@p2', [status, ref]);
+  await db.query('UPDATE claims SET status=$1 WHERE ref=$2', [status, ref]);
 
   // When HRM Supervisor allocates, save the assigned processor IDs
   if (status === 'approved') {
     const { assignedCompilerId, assignedVerifierId, assignedHrApproverId } = req.body;
     if (assignedCompilerId || assignedVerifierId || assignedHrApproverId) {
       await db.query(
-        `UPDATE claims SET assigned_compiler_id=@p1, assigned_verifier_id=@p2, assigned_hr_approver_id=@p3 WHERE ref=@p4`,
+        `UPDATE claims SET assigned_compiler_id=$1, assigned_verifier_id=$2, assigned_hr_approver_id=$3 WHERE ref=$4`,
         [assignedCompilerId||null, assignedVerifierId||null, assignedHrApproverId||null, ref]
       );
     }
@@ -681,7 +586,7 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
+     VALUES ($1,$2,$3,$4,$5,$6)`,
     [existing.id, existing.status, status, user.id, note||'', DB_CAPS.infoMessage && note ? note : null]
   );
 
@@ -690,7 +595,7 @@ app.patch('/api/claims/:ref/status', requireAuth, async (req, res) => {
 
   if (status === 'hrm_pending') {
     sendEmail({ to: await getEmailsByRole('hrm_supervisor'), subject: `[GPG Claims] Claim awaiting allocation — ${ref}`,
-      html: emailTemplate('Claim ready for allocation', `<p>Claim <strong>${ref}</strong> has been approved by the line manager and is awaiting allocation to the HR compiler.</p>${claimSummaryHtml}`) });
+      html: emailTemplate('Claim ready for allocation', `<p>Claim <strong>${ref}</strong> has been approved by the line manager and is awaiting allocation.</p>${claimSummaryHtml}`) });
   }
   if (status === 'approved') {
     sendEmail({ to: await getEmailsByRole('compiler'), subject: `[GPG Claims] Claim allocated — ${ref}`,
@@ -771,7 +676,7 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
   const emailSel  = DB_CAPS.userEmail ? ', u.email AS owner_email' : '';
   const { rows: [existing] } = await db.query(
     `SELECT c.id, c.status, c.name, c.purpose, c.amount, c.user_id, c.persal ${emailSel}
-     FROM claims c ${emailJoin} WHERE c.ref=@p1`,
+     FROM claims c ${emailJoin} WHERE c.ref=$1`,
     [ref]
   );
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
@@ -781,17 +686,17 @@ app.post('/api/claims/:ref/request-info', requireAuth, async (req, res) => {
 
   if (DB_CAPS.feedbackMeta) {
     await db.query(
-      `UPDATE claims SET status='info_requested', feedback_recipient_role=@p1, feedback_return_status=@p2 WHERE ref=@p3`,
+      `UPDATE claims SET status='info_requested', feedback_recipient_role=$1, feedback_return_status=$2 WHERE ref=$3`,
       [recipientRole, config.queueStatus, ref]
     );
   } else {
-    await db.query(`UPDATE claims SET status='info_requested' WHERE ref=@p1`, [ref]);
+    await db.query(`UPDATE claims SET status='info_requested' WHERE ref=$1`, [ref]);
   }
   const updated = await getClaimFull('ref', ref);
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
+     VALUES ($1,$2,$3,$4,$5,$6)`,
     [existing.id, config.queueStatus, 'info_requested', req.user.id, message, DB_CAPS.infoMessage ? message : null]
   );
 
@@ -827,7 +732,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
 
   const { rows: [existing] } = await db.query(
     `SELECT id, status, name, purpose, persal, feedback_recipient_role, feedback_return_status
-     FROM claims WHERE ref=@p1`,
+     FROM claims WHERE ref=$1`,
     [ref]
   );
   if (!existing) return res.status(404).json({ error: 'Claim not found' });
@@ -848,11 +753,11 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
   const returnStatus = existing.feedback_return_status || 'hr_approved';
   if (DB_CAPS.feedbackMeta) {
     await db.query(
-      `UPDATE claims SET status=@p1, feedback_recipient_role=NULL, feedback_return_status=NULL WHERE ref=@p2`,
+      `UPDATE claims SET status=$1, feedback_recipient_role=NULL, feedback_return_status=NULL WHERE ref=$2`,
       [returnStatus, ref]
     );
   } else {
-    await db.query(`UPDATE claims SET status=@p1 WHERE ref=@p2`, [returnStatus, ref]);
+    await db.query(`UPDATE claims SET status=$1 WHERE ref=$2`, [returnStatus, ref]);
   }
   const updated = await getClaimFull('ref', ref);
 
@@ -860,7 +765,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
     for (const a of newAttachments.filter(a => a.fileData && a.fileName)) {
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [existing.id, a.fieldKey||'feedback-response', a.fileName, a.fileData,
          a.mimeType||'application/octet-stream', a.fileSize||0, req.user.id]
       );
@@ -869,7 +774,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
 
   await db.query(
     `INSERT INTO claim_status_history (claim_id, from_status, to_status, changed_by, note, info_message)
-     VALUES (@p1,@p2,@p3,@p4,@p5,@p6)`,
+     VALUES ($1,$2,$3,$4,$5,$6)`,
     [existing.id, 'info_requested', returnStatus, req.user.id,
      message||'Response provided', DB_CAPS.infoMessage ? (message||'') : null]
   );
@@ -896,7 +801,7 @@ app.post('/api/claims/:ref/respond-info', requireAuth, async (req, res) => {
 app.get('/api/claims/:ref/attachments/:attachmentId', requireAuth, async (req, res) => {
   if (!DB_CAPS.attachments) return res.status(404).json({ error: 'Attachments not enabled' });
   const { rows: [attach] } = await db.query(
-    `SELECT * FROM claim_attachments WHERE id=@p1`, [req.params.attachmentId]
+    `SELECT * FROM claim_attachments WHERE id=$1`, [req.params.attachmentId]
   );
   if (!attach) return res.status(404).json({ error: 'Attachment not found' });
   const buffer = Buffer.from(attach.file_data, 'base64');
@@ -913,14 +818,14 @@ app.post('/api/claims/:ref/signature', requireAuth, async (req, res) => {
   const ALLOWED = ['sig_official', 'sig_supervisor', 'sig_hrm_supervisor', 'sig_approver'];
   if (!ALLOWED.includes(fieldKey)) return res.status(400).json({ error: 'Invalid signature field' });
   try {
-    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = @p1', [ref]);
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
-    await db.query('DELETE FROM claim_attachments WHERE claim_id = @p1 AND field_key = @p2', [claim.id, fieldKey]);
+    await db.query('DELETE FROM claim_attachments WHERE claim_id = $1 AND field_key = $2', [claim.id, fieldKey]);
     if (imageData) {
       const base64 = imageData.replace(/^data:[^;]+;base64,/, '');
       await db.query(
         `INSERT INTO claim_attachments (claim_id, field_key, file_name, file_data, mime_type, file_size, uploaded_by)
-         VALUES (@p1,@p2,@p3,@p4,'image/png',@p5,@p6)`,
+         VALUES ($1,$2,$3,$4,'image/png',$5,$6)`,
         [claim.id, fieldKey, `${fieldKey}.png`, base64, Math.round(base64.length * 0.75), req.user.id]
       );
     }
@@ -932,11 +837,10 @@ app.get('/api/claims/:ref/signatures', requireAuth, async (req, res) => {
   if (!DB_CAPS.attachments) return res.json({});
   const { ref } = req.params;
   try {
-    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = @p1', [ref]);
+    const { rows: [claim] } = await db.query('SELECT id FROM claims WHERE ref = $1', [ref]);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
     const { rows } = await db.query(
-      `SELECT field_key, file_data, mime_type FROM claim_attachments
-       WHERE claim_id = @p1 AND field_key LIKE 'sig_%'`,
+      `SELECT field_key, file_data, mime_type FROM claim_attachments WHERE claim_id = $1 AND field_key LIKE 'sig_%'`,
       [claim.id]
     );
     const result = {};
@@ -949,15 +853,13 @@ app.get('/api/claims/:ref/signatures', requireAuth, async (req, res) => {
 app.get('/api/tariff-schedules', requireAuth, async (req, res) => {
   if (!DB_CAPS.tariffSchedules) return res.json([]);
   try {
-    const { rows: schedules } = await db.query(
-      `SELECT * FROM tariff_schedules ORDER BY effective_date DESC`
-    );
+    const { rows: schedules } = await db.query(`SELECT * FROM tariff_schedules ORDER BY effective_date DESC`);
     const scheduleIds = schedules.map(s => s.id);
-    const ratesRes = scheduleIds.length > 0
-      ? await queryInIds(`SELECT * FROM tariff_rates WHERE schedule_id IN ($$IN$$)`, scheduleIds)
+    const { rows: rates } = scheduleIds.length > 0
+      ? await db.query(`SELECT * FROM tariff_rates WHERE schedule_id = ANY($1::uuid[])`, [scheduleIds])
       : { rows: [] };
     const ratesBySchedule = {};
-    ratesRes.rows.forEach(r => { (ratesBySchedule[r.schedule_id] ||= []).push(r); });
+    rates.forEach(r => { (ratesBySchedule[r.schedule_id] ||= []).push(r); });
     res.json(schedules.map(s => ({ ...s, tariff_rates: ratesBySchedule[s.id] || [] })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -970,7 +872,7 @@ app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
   try {
     const { rows: [schedule] } = await db.query(
       `INSERT INTO tariff_schedules (circular_ref, effective_date, notes, created_by)
-       OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4)`,
+       VALUES ($1,$2,$3,$4) RETURNING *`,
       [circularRef, effectiveDate, notes||'', req.user.id]
     );
     let insertedRates = [];
@@ -978,7 +880,7 @@ app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
       for (const r of rates) {
         const { rows: [rate] } = await db.query(
           `INSERT INTO tariff_rates (schedule_id, category, fuel_type, band, scheme, rate_rand, persal_ref)
-           OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
           [schedule.id, r.category, r.fuelType||'petrol', r.band, r.scheme||'private', parseFloat(r.rateRand)||0, r.persalRef||'']
         );
         insertedRates.push(rate);
@@ -991,14 +893,14 @@ app.post('/api/tariff-schedules', requireAuth, async (req, res) => {
 app.delete('/api/tariff-schedules/:id', requireAuth, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
   try {
-    await db.query(`DELETE FROM tariff_schedules WHERE id=@p1`, [req.params.id]);
+    await db.query(`DELETE FROM tariff_schedules WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ── Claim history ─────────────────────────────────────────────────────────────
 app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
-  const { rows: [claim] } = await db.query(`SELECT id FROM claims WHERE ref=@p1`, [req.params.ref]);
+  const { rows: [claim] } = await db.query(`SELECT id FROM claims WHERE ref=$1`, [req.params.ref]);
   if (!claim) return res.status(404).json({ error: 'Claim not found' });
   try {
     const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
@@ -1007,7 +909,7 @@ app.get('/api/claims/:ref/history', requireAuth, async (req, res) => {
               u.name AS user_name, u.role AS user_role
        FROM claim_status_history h
        LEFT JOIN users u ON u.id = h.changed_by
-       WHERE h.claim_id=@p1
+       WHERE h.claim_id=$1
        ORDER BY h.created_at ASC`,
       [claim.id]
     );
@@ -1038,9 +940,8 @@ app.patch('/api/sla-targets/:status', requireAuth, async (req, res) => {
   const { working_days } = req.body;
   if (!working_days || working_days < 1) return res.status(400).json({ error: 'working_days must be >= 1' });
   try {
-    // SQL Server: UPDATE with OUTPUT before WHERE
     const { rows: [updated] } = await db.query(
-      `UPDATE sla_targets SET working_days=@p1 OUTPUT INSERTED.* WHERE status=@p2`,
+      `UPDATE sla_targets SET working_days=$1 WHERE status=$2 RETURNING *`,
       [working_days, req.params.status]
     );
     if (!updated) return res.status(404).json({ error: 'SLA target not found' });
@@ -1059,7 +960,7 @@ app.get('/api/delegations', requireAuth, async (req, res) => {
        FROM delegations d
        JOIN users tor ON tor.id = d.delegator_id
        JOIN users tee ON tee.id = d.delegate_id
-       WHERE d.delegator_id=@p1 OR d.delegate_id=@p1
+       WHERE d.delegator_id=$1 OR d.delegate_id=$1
        ORDER BY d.created_at DESC`,
       [req.user.id]
     );
@@ -1085,7 +986,7 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
   try {
     const { rows: [del] } = await db.query(
       `INSERT INTO delegations (delegator_id, delegate_id, role, start_date, end_date, reason, active)
-       OUTPUT INSERTED.* VALUES (@p1,@p2,@p3,@p4,@p5,@p6,1)`,
+       VALUES ($1,$2,$3,$4,$5,$6,true) RETURNING *`,
       [user.id, delegateId, role, startDate, endDate, reason||'']
     );
     const { rows: [full] } = await db.query(
@@ -1095,11 +996,11 @@ app.post('/api/delegations', requireAuth, async (req, res) => {
        FROM delegations d
        JOIN users tor ON tor.id = d.delegator_id
        JOIN users tee ON tee.id = d.delegate_id
-       WHERE d.id=@p1`,
+       WHERE d.id=$1`,
       [del.id]
     );
     if (DB_CAPS.userEmail) {
-      const { rows: [delegateUser] } = await db.query(`SELECT email FROM users WHERE id=@p1`, [delegateId]);
+      const { rows: [delegateUser] } = await db.query(`SELECT email FROM users WHERE id=$1`, [delegateId]);
       if (delegateUser?.email) {
         sendEmail({
           to: delegateUser.email,
@@ -1128,21 +1029,20 @@ app.delete('/api/delegations/:id', requireAuth, async (req, res) => {
   if (!DB_CAPS.delegations) return res.status(503).json({ error: 'Delegations not available' });
   try {
     const { rows: [existing] } = await db.query(
-      `SELECT delegator_id FROM delegations WHERE id=@p1`, [req.params.id]
+      `SELECT delegator_id FROM delegations WHERE id=$1`, [req.params.id]
     );
     if (!existing) return res.status(404).json({ error: 'Delegation not found' });
     if (existing.delegator_id !== req.user.id && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Only the delegator can revoke a delegation' });
     }
-    await db.query(`UPDATE delegations SET active=0 WHERE id=@p1`, [req.params.id]);
+    await db.query(`UPDATE delegations SET active=false WHERE id=$1`, [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── Users (admin CRUD) ────────────────────────────────────────────────────────
+// ── Users (admin + hrm_supervisor CRUD) ──────────────────────────────────────
 app.get('/api/users', requireAuth, async (req, res) => {
   try {
-    // admin and hrm_supervisor need id+name+role to populate allocation pickers
     const fullCols = ['admin', 'hrm_supervisor'].includes(req.user.role);
     const cols = fullCols
       ? 'id, username, name, persal, dept, role, email, created_at'
@@ -1163,13 +1063,13 @@ app.post('/api/users', requireAuth, async (req, res) => {
   const username = (uname || email.split('@')[0]).toLowerCase().replace(/[^a-z0-9._-]/g, '');
   try {
     const { rows: [existing] } = await db.query(
-      'SELECT TOP 1 id FROM users WHERE username=@p1 OR LOWER(email)=LOWER(@p2)', [username, email]
+      'SELECT id FROM users WHERE username=$1 OR LOWER(email)=LOWER($2) LIMIT 1', [username, email]
     );
     if (existing) return res.status(409).json({ error: 'A user with that username or email already exists' });
     const { rows: [user] } = await db.query(
       `INSERT INTO users (username, password, name, persal, dept, role, email)
-       OUTPUT INSERTED.id, INSERTED.username, INSERTED.name, INSERTED.persal, INSERTED.dept, INSERTED.role, INSERTED.email, INSERTED.created_at
-       VALUES (@p1,@p2,@p3,@p4,@p5,@p6,@p7)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, username, name, persal, dept, role, email, created_at`,
       [username, pw, name.trim(), persal.trim(), dept.trim(), role, email.trim().toLowerCase()]
     );
     res.status(201).json(user);
@@ -1181,18 +1081,18 @@ app.patch('/api/users/:id', requireAuth, async (req, res) => {
   const { name, email, role, persal, dept, password: pw } = req.body;
   if (role && !VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
   try {
-    const { rows: [existing] } = await db.query('SELECT TOP 1 id FROM users WHERE id=@p1', [req.params.id]);
+    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1 LIMIT 1', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'User not found' });
     const { rows: [user] } = await db.query(
       `UPDATE users SET
-        name     = COALESCE(@p1, name),
-        email    = COALESCE(@p2, email),
-        role     = COALESCE(@p3, role),
-        persal   = COALESCE(@p4, persal),
-        dept     = COALESCE(@p5, dept),
-        password = CASE WHEN @p6 IS NOT NULL AND @p6 <> '' THEN @p6 ELSE password END
-       OUTPUT INSERTED.id, INSERTED.username, INSERTED.name, INSERTED.persal, INSERTED.dept, INSERTED.role, INSERTED.email, INSERTED.created_at
-       WHERE id = @p7`,
+        name     = COALESCE($1, name),
+        email    = COALESCE($2, email),
+        role     = COALESCE($3, role),
+        persal   = COALESCE($4, persal),
+        dept     = COALESCE($5, dept),
+        password = CASE WHEN $6 IS NOT NULL AND $6 <> '' THEN $6 ELSE password END
+       WHERE id = $7
+       RETURNING id, username, name, persal, dept, role, email, created_at`,
       [name?.trim()||null, email?.trim().toLowerCase()||null, role||null,
        persal?.trim()??null, dept?.trim()??null, pw||null, req.params.id]
     );
@@ -1206,9 +1106,9 @@ app.delete('/api/users/:id', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Cannot delete your own account' });
   }
   try {
-    const { rows: [existing] } = await db.query('SELECT TOP 1 id FROM users WHERE id=@p1', [req.params.id]);
+    const { rows: [existing] } = await db.query('SELECT id FROM users WHERE id=$1 LIMIT 1', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'User not found' });
-    await db.query('DELETE FROM users WHERE id=@p1', [req.params.id]);
+    await db.query('DELETE FROM users WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1219,13 +1119,14 @@ app.get('/api/audit', requireAuth, async (req, res) => {
   try {
     const infoCol = DB_CAPS.infoMessage ? ', h.info_message' : '';
     const { rows } = await db.query(
-      `SELECT TOP 500 h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
+      `SELECT h.id, h.from_status, h.to_status, h.note ${infoCol}, h.created_at,
               u.name AS user_name, u.role AS user_role,
               c.ref AS claim_ref, c.name AS claim_name, c.persal AS claim_persal, c.dept AS claim_dept
        FROM claim_status_history h
        LEFT JOIN users u  ON u.id  = h.changed_by
        LEFT JOIN claims c ON c.id  = h.claim_id
-       ORDER BY h.created_at DESC`
+       ORDER BY h.created_at DESC
+       LIMIT 500`
     );
     res.json(rows.map(r => ({
       ...r,
@@ -1267,21 +1168,12 @@ async function ensureUsersSeeded() {
     { username: 'admin',    password: 'admin123', name: 'Admin User',  persal: '',         dept: 'GPG — System Admin', role: 'admin',          email: 'admin@gpg-demo.gov.za'         },
   ];
   try {
-    const pool = await getPool();
     for (const u of DEMO) {
-      const req = pool.request();
-      req.input('un', u.username);
-      req.input('pw', u.password);
-      req.input('nm', u.name);
-      req.input('ps', u.persal);
-      req.input('dp', u.dept);
-      req.input('rl', u.role);
-      req.input('em', DB_CAPS.userEmail ? u.email : null);
-      await req.query(`
-        IF NOT EXISTS (SELECT 1 FROM users WHERE username = @un)
-          INSERT INTO users (username, password, name, persal, dept, role, email)
-          VALUES (@un, @pw, @nm, @ps, @dp, @rl, @em)
-      `);
+      await db.query(
+        `INSERT INTO users (username, password, name, persal, dept, role, email)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (username) DO NOTHING`,
+        [u.username, u.password, u.name, u.persal, u.dept, u.role, DB_CAPS.userEmail ? u.email : null]
+      );
     }
     console.log('Demo users seeded.');
   } catch (err) {
@@ -1292,58 +1184,33 @@ async function ensureUsersSeeded() {
 // ── Startup: idempotent schema migrations ─────────────────────────────────────
 async function runStartupMigrations() {
   try {
-    const pool = await getPool();
-
-    // Ensure users_role_check constraint is current
-    await pool.request().query(`
-      BEGIN TRY
-        IF EXISTS (SELECT 1 FROM sys.check_constraints
-                   WHERE name = 'ck_users_role' AND parent_object_id = OBJECT_ID('users'))
-          ALTER TABLE users DROP CONSTRAINT ck_users_role;
-        IF EXISTS (SELECT 1 FROM sys.check_constraints
-                   WHERE name = 'users_role_check' AND parent_object_id = OBJECT_ID('users'))
-          ALTER TABLE users DROP CONSTRAINT users_role_check;
-        ALTER TABLE users ADD CONSTRAINT ck_users_role CHECK (role IN (
-          'official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'
-        ));
-      END TRY BEGIN CATCH END CATCH;
+    // Role constraint
+    await db.query(`
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+      ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN (
+        'official','supervisor','hrm_supervisor','compiler','verifier','approver','hrs','admin'
+      ));
     `);
-
-    // Ensure claims_status_check constraint is current
-    await pool.request().query(`
-      BEGIN TRY
-        IF EXISTS (SELECT 1 FROM sys.check_constraints
-                   WHERE name = 'ck_claims_status' AND parent_object_id = OBJECT_ID('claims'))
-          ALTER TABLE claims DROP CONSTRAINT ck_claims_status;
-        IF EXISTS (SELECT 1 FROM sys.check_constraints
-                   WHERE name = 'claims_status_check' AND parent_object_id = OBJECT_ID('claims'))
-          ALTER TABLE claims DROP CONSTRAINT claims_status_check;
-        ALTER TABLE claims ADD CONSTRAINT ck_claims_status CHECK (status IN (
-          'draft','pending','hrm_pending','approved','compiled','verified',
-          'hr_approved','rejected','info_requested','paid'
-        ));
-      END TRY BEGIN CATCH END CATCH;
+    // Status constraint
+    await db.query(`
+      ALTER TABLE claims DROP CONSTRAINT IF EXISTS claims_status_check;
+      ALTER TABLE claims ADD CONSTRAINT claims_status_check CHECK (status IN (
+        'draft','pending','hrm_pending','approved','compiled','verified',
+        'hr_approved','rejected','info_requested','paid'
+      ));
     `);
-
-    // Ensure HRM Supervisor SLA row exists
-    await pool.request().query(`
-      IF NOT EXISTS (SELECT 1 FROM sla_targets WHERE status = 'hrm_pending')
-        INSERT INTO sla_targets (status, working_days, label)
-        VALUES ('hrm_pending', 2, 'HRM Supervisor allocation');
+    // HRM Supervisor SLA row
+    await db.query(`
+      INSERT INTO sla_targets (status, working_days, label)
+      VALUES ('hrm_pending', 2, 'HRM Supervisor allocation')
+      ON CONFLICT (status) DO NOTHING;
     `);
-
-    // Add HR processor assignment columns to claims
-    await pool.request().query(`
-      BEGIN TRY
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_compiler_id')
-          ALTER TABLE claims ADD assigned_compiler_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_verifier_id')
-          ALTER TABLE claims ADD assigned_verifier_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
-        IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('claims') AND name = 'assigned_hr_approver_id')
-          ALTER TABLE claims ADD assigned_hr_approver_id UNIQUEIDENTIFIER NULL REFERENCES users(id);
-      END TRY BEGIN CATCH END CATCH;
+    // HR processor assignment columns
+    await db.query(`
+      ALTER TABLE claims ADD COLUMN IF NOT EXISTS assigned_compiler_id uuid REFERENCES users(id);
+      ALTER TABLE claims ADD COLUMN IF NOT EXISTS assigned_verifier_id uuid REFERENCES users(id);
+      ALTER TABLE claims ADD COLUMN IF NOT EXISTS assigned_hr_approver_id uuid REFERENCES users(id);
     `);
-
     console.log('Startup migrations applied.');
   } catch (err) {
     console.warn('Startup migration warning:', err.message);
@@ -1355,13 +1222,13 @@ const PORT = process.env.PORT || 5001;
 app.listen(PORT, async () => {
   console.log(`GPG Travel Claims API → http://localhost:${PORT}`);
   try {
-    await getPool();
-    console.log('Azure SQL connected.');
+    await pool.connect();
+    console.log('PostgreSQL connected.');
     await detectDbCapabilities();
     await runStartupMigrations();
     await ensureUsersSeeded();
   } catch (err) {
     console.error('DB connection failed:', err.message);
-    console.error('Set MSSQL_SERVER, MSSQL_DATABASE, MSSQL_USER, MSSQL_PASSWORD in .env or Azure App Service config.');
+    console.error('Set DATABASE_URL in your .env file.');
   }
 });
